@@ -1,40 +1,110 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/pages/api-reference/create-next-app).
+# CACC Drill Board
 
-## Getting Started
+A real-time drill management and roster system built with Next.js and TypeScript.
 
-First, run the development server:
+This application was designed to support drill coordination, roster tracking, and live state updates for structured training environments.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+---
+
+## 🚀 Overview
+
+CACC Drill Board is a web-based platform that enables:
+
+- Real-time board state updates
+- Drill roster management
+- Role-based access (Admin / Judge / Public views)
+- Socket-based live synchronization
+- Structured data handling via API routes
+
+The system is designed to support organized training environments where visibility, timing, and structured control are critical.
+
+---
+
+## 🏗 Tech Stack
+
+- **Next.js**
+- **React**
+- **TypeScript**
+- **Node.js**
+- **WebSockets**
+- **REST API Routes**
+- **ESLint**
+
+---
+
+## 📁 Project Structure
+
+```
+components/     → Reusable UI components  
+lib/            → State logic, socket client, utilities  
+pages/          → Application routes and API endpoints  
+public/         → Static assets  
+styles/         → Global styling  
+data/           → Drill roster CSV data  
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
+## 🔐 Role-Based Views
 
-[API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
+- **Public View** – Displays board state
+- **Judge View** – Interaction layer for scoring or control
+- **Admin View** – Authentication, roster reload, and board management
 
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) instead of React pages.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/pages/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 📡 API Endpoints
 
-## Learn More
+- `/api/state` – Returns current board state
+- `/api/socket` – WebSocket connection handler
+- `/api/admin-login`
+- `/api/admin-logout`
+- `/api/reload-roster`
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn-pages-router) - an interactive Next.js tutorial.
+## 💡 Purpose
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+This project demonstrates:
 
-## Deploy on Vercel
+- Real-time state synchronization
+- Modular architecture
+- API route structuring
+- Separation of concerns
+- Controlled state management in a multi-role environment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+---
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+## 🛠 Local Development
+
+```bash
+npm install
+npm run dev
+```
+
+Visit:
+
+```
+http://localhost:3000
+```
+
+---
+
+## 📈 Future Improvements
+
+- Persistent database storage
+- Authentication hardening
+- Audit logging
+- Deployment configuration (Vercel / Docker)
+- Role permission refinement
+
+---
+
+## 👤 Author
+
+Jacob A. Rodriguez  
+Assistant S-3 (Training Officer), California Cadet Corps  
+MBA – Organizational Leadership  
+
+---
+
