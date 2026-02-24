@@ -1,0 +1,1508 @@
+// pages/api/socket.ts
+export const config = { api: { bodyParser: false } };
+
+import type { NextApiRequest, NextApiResponse } from "next";
+import { Server as IOServer } from "socket.io";
+
+import type { BoardState, Pad, Team, PadStatus, ScheduleEvent, CycleStats } from "@/lib/state";
+import { createInitialState, createPad } from "@/lib/state";
+import { buildStateFromRosterCsv } from "@/lib/roster";
+
+type NextResWithSocket = NextApiResponse & { socket: any & { server: any } };
+
+type AuditEntry = {
+  id: string;
+  ts: number;
+  padId: number | null;
+  action: string;
+  detail: string;
+};
+
+const REPORT_WINDOW_MS = 5 * 60 * 1000;
+const MAX_AUDIT = 800;
+const MAX_UNDO_PER_PAD = 35;
+
+// ====== COMM (Admin <-> Judge) ======
+type CommRole = "admin" | "judge";
+
+type JudgePresence = {
+  socketId: string;
+  connectedAt: number;
+  lastSeenAt: number;
+  padId: number | null;
+  name?: string | null;
+};
+
+type ChatFrom = "ADMIN" | "JUDGE";
+type ChatMessage = {
+  id: string;
+  ts: number;
+  from: ChatFrom;
+  text: string;
+};
+
+type CommSnapshot = {
+  judges: JudgePresence[];
+  chats: Record<string, ChatMessage[]>; // keyed by judge socketId
+};
+
+const MAX_CHAT_PER_JUDGE = 220;
+
+const G = globalThis as any;
+
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function ensureGlobals() {
+  if (!G.boardState) G.boardState = null;
+  if (!G.padHistory) G.padHistory = {};
+  if (!G.audit) G.audit = [];
+  if (typeof G.rosterLoaded !== "boolean") G.rosterLoaded = false;
+
+  // comm
+  if (!G.commAdmins) G.commAdmins = new Set<string>(); // socketIds
+  if (!G.commJudges) G.commJudges = new Map<string, JudgePresence>(); // socketId -> presence
+  if (!G.commChats) G.commChats = new Map<string, ChatMessage[]>(); // judgeSocketId -> messages
+}
+
+function pushAudit(entry: Omit<AuditEntry, "id">) {
+  ensureGlobals();
+  G.audit.push({ id: uid(), ...entry });
+  if (G.audit.length > MAX_AUDIT) G.audit.splice(0, G.audit.length - MAX_AUDIT);
+  if (G.boardState) (G.boardState as any).audit = G.audit;
+}
+
+function snapshotForUndo(padId: number) {
+  ensureGlobals();
+  const key = `__stack_${padId}`;
+  const stack: any[] = G.padHistory[key] ?? [];
+  stack.push(JSON.parse(JSON.stringify(G.boardState)));
+  if (stack.length > MAX_UNDO_PER_PAD) stack.splice(0, stack.length - MAX_UNDO_PER_PAD);
+  G.padHistory[key] = stack;
+}
+
+function undoForPad(padId: number) {
+  ensureGlobals();
+  const key = `__stack_${padId}`;
+  const stack: any[] = G.padHistory[key] ?? [];
+  if (stack.length === 0) return false;
+  const prev = stack.pop();
+  if (!prev) return false;
+  G.boardState = prev;
+  return true;
+}
+
+/** ---------- PAD RESOLUTION (dynamic) ---------- */
+function resolvePadId(payload: any): number | null {
+  const v = payload?.padId ?? payload?.id ?? payload?.pad ?? payload;
+  if (v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.floor(n);
+}
+
+function getPadById(padId: number): Pad | null {
+  const s = G.boardState as BoardState | null;
+  if (!s?.pads) return null;
+  return s.pads.find((p) => p.id === padId) ?? null;
+}
+
+function recomputeNextPadId(state: BoardState) {
+  const maxId = (state.pads ?? []).reduce((m, p) => Math.max(m, Number(p.id) || 0), 0);
+  state.nextPadId = Math.max(state.nextPadId ?? 1, maxId + 1);
+}
+
+/** ---------- core helpers ---------- */
+function setStatus(pad: Pad, status: PadStatus, nowMs: number) {
+  pad.status = status;
+  pad.updatedAt = nowMs;
+}
+
+function isArrivedForNow(pad: Pad): boolean {
+  const nowId = pad.now?.id ?? null;
+  return !!pad.nowArrivedAt && !!pad.nowArrivedTeamId && !!nowId && pad.nowArrivedTeamId === nowId;
+}
+
+function startReportTimerForNow(pad: Pad, nowMs: number) {
+  pad.reportByTeamId = pad.now?.id ?? null;
+  pad.reportByDeadlineAt = pad.now ? nowMs + REPORT_WINDOW_MS : null;
+  setStatus(pad, pad.now ? "REPORTING" : "IDLE", nowMs);
+}
+
+function clearArrivalForNow(pad: Pad) {
+  pad.nowArrivedAt = null;
+  pad.nowArrivedTeamId = null;
+  pad.runStartedAt = null;
+}
+
+function markArrived(pad: Pad, nowMs: number) {
+  pad.nowArrivedAt = nowMs;
+  pad.nowArrivedTeamId = pad.now?.id ?? null;
+
+  pad.reportByTeamId = null;
+  pad.reportByDeadlineAt = null;
+
+  pad.runStartedAt = nowMs;
+
+  setStatus(pad, "ON_PAD", nowMs);
+}
+
+function markNowTeam(pad: Pad, tag: string, nowMs: number) {
+  if (!pad.now) return;
+  (pad.now as any).tag = tag;
+  pad.updatedAt = nowMs;
+}
+
+function swapNowOnDeck(pad: Pad, nowMs: number) {
+  const tmp = pad.now ?? null;
+  pad.now = pad.onDeck ?? null;
+  pad.onDeck = tmp;
+
+  pad.breakUntilAt = null;
+  pad.breakReason = null;
+  pad.breakStartAt = null;
+
+  clearArrivalForNow(pad);
+  startReportTimerForNow(pad, nowMs);
+}
+
+function skipOnDeck(pad: Pad, nowMs: number) {
+  if (!pad.onDeck) return;
+
+  const moved = pad.onDeck;
+  (moved as any).tag = "SKIPPED";
+
+  const nextOnDeck = pad.standby.length > 0 ? pad.standby[0] : null;
+  const nextStandby = pad.standby.length > 0 ? pad.standby.slice(1) : [];
+
+  pad.onDeck = nextOnDeck;
+  pad.standby = [...nextStandby, moved];
+  pad.updatedAt = nowMs;
+}
+
+function clearPad(pad: Pad, nowMs: number) {
+  pad.now = null;
+  pad.onDeck = null;
+  pad.standby = [];
+  pad.note = "";
+
+  pad.breakUntilAt = null;
+  pad.breakReason = null;
+  pad.breakStartAt = null;
+
+  clearArrivalForNow(pad);
+
+  pad.lastCompleteAt = null;
+  pad.reportByTeamId = null;
+  pad.reportByDeadlineAt = null;
+
+  setStatus(pad, "IDLE", nowMs);
+}
+
+/** ---------- Soft ETA model ---------- */
+function updateCycleStats(state: BoardState, pad: Pad, durationSec: number, nowMs: number) {
+  if (!state.cycleStatsByPad) state.cycleStatsByPad = {};
+  if (!state.cycleStatsByKey) state.cycleStatsByKey = {};
+
+  const d = Math.max(10, Math.min(60 * 30, Math.floor(durationSec)));
+  const padId = pad.id;
+
+  state.cycleStatsByPad[padId] = nextStats(state.cycleStatsByPad[padId], d, nowMs);
+
+  const keyA = `pad:${padId}`;
+  state.cycleStatsByKey[keyA] = nextStats(state.cycleStatsByKey[keyA], d, nowMs);
+
+  const labelKey = pad.label ? `label:${pad.label}` : null;
+  if (labelKey) state.cycleStatsByKey[labelKey] = nextStats(state.cycleStatsByKey[labelKey], d, nowMs);
+
+  const teamCat = pad.now?.category ?? null;
+  if (teamCat) {
+    const catKey = `cat:${teamCat}`;
+    state.cycleStatsByKey[catKey] = nextStats(state.cycleStatsByKey[catKey], d, nowMs);
+  }
+}
+
+function nextStats(prev: CycleStats | undefined, newSec: number, nowMs: number): CycleStats {
+  if (!prev) return { count: 1, avgSec: newSec, lastSec: newSec, updatedAt: nowMs };
+  const count = prev.count + 1;
+  const avg = (prev.avgSec * prev.count + newSec) / count;
+  return { count, avgSec: avg, lastSec: newSec, updatedAt: nowMs };
+}
+
+/** ---------- Schedule helpers ---------- */
+function normalizeSchedule(s: ScheduleEvent[] | undefined | null): ScheduleEvent[] {
+  const list = Array.isArray(s) ? s : [];
+  return list
+    .filter((e) => e && e.id && e.title && e.startAt && e.endAt)
+    .map((e) => ({
+      ...e,
+      padIds: e.scope === "PAD" ? (e.padIds ?? []) : undefined,
+      createdAt: e.createdAt ?? Date.now(),
+      updatedAt: e.updatedAt ?? Date.now(),
+    }))
+    .sort((a, b) => a.startAt - b.startAt);
+}
+
+/** ---------- BOOTSTRAP ---------- */
+function loadStateIfNeeded() {
+  ensureGlobals();
+  if (G.boardState) return;
+  G.boardState = createInitialState();
+  G.rosterLoaded = false;
+}
+
+function sanitizeStateAfterAnyLoad(state: BoardState) {
+  const nowMs = Date.now();
+
+  state.pads = state.pads ?? [];
+  state.nextPadId = state.nextPadId ?? 1;
+  recomputeNextPadId(state);
+
+  state.globalBreakStartAt = state.globalBreakStartAt ?? null;
+  state.globalBreakUntilAt = state.globalBreakUntilAt ?? null;
+  state.globalBreakReason = state.globalBreakReason ?? null;
+
+  state.globalMessage = state.globalMessage ?? null;
+  state.globalMessageUntilAt = state.globalMessageUntilAt ?? null;
+
+  (state as any).eventHeaderLabel = (state as any).eventHeaderLabel ?? "COMPETITION MATRIX";
+
+  state.schedule = normalizeSchedule(state.schedule);
+  state.scheduleUpdatedAt = state.scheduleUpdatedAt ?? nowMs;
+
+  state.cycleStatsByPad = state.cycleStatsByPad ?? {};
+  state.cycleStatsByKey = state.cycleStatsByKey ?? {};
+  state.avgCycleSecondsByPad = state.avgCycleSecondsByPad ?? {};
+
+  for (const p of state.pads) {
+    (p as any).name = (p as any).name ?? `Area ${p.id}`;
+    (p as any).label = (p as any).label ?? "";
+
+    p.status = (p.status ?? (p.now ? "REPORTING" : "IDLE")) as PadStatus;
+
+    p.breakUntilAt = p.breakUntilAt ?? null;
+    p.breakReason = p.breakReason ?? null;
+    p.breakStartAt = p.breakStartAt ?? null;
+
+    p.runStartedAt = p.runStartedAt ?? null;
+    p.lastRunEndedAt = p.lastRunEndedAt ?? null;
+
+    p.message = p.message ?? null;
+    p.messageUntilAt = p.messageUntilAt ?? null;
+
+    p.nowArrivedAt = p.nowArrivedAt ?? null;
+    p.nowArrivedTeamId = p.nowArrivedTeamId ?? null;
+
+    p.lastCompleteAt = p.lastCompleteAt ?? null;
+
+    p.reportByDeadlineAt = p.reportByDeadlineAt ?? null;
+    p.reportByTeamId = p.reportByTeamId ?? null;
+
+    p.updatedAt = p.updatedAt ?? nowMs;
+
+    const breakActive = !!p.breakUntilAt && p.breakUntilAt > nowMs;
+
+    if (!breakActive && p.now && !p.reportByDeadlineAt && !isArrivedForNow(p)) {
+      startReportTimerForNow(p, nowMs);
+    }
+
+    if (isArrivedForNow(p)) {
+      p.reportByTeamId = null;
+      p.reportByDeadlineAt = null;
+      p.status = p.status === "RUNNING" ? "RUNNING" : "ON_PAD";
+      if (!p.runStartedAt) p.runStartedAt = p.nowArrivedAt;
+    }
+  }
+
+  state.updatedAt = nowMs;
+}
+
+/** ---------- participant insertion helper ---------- */
+function insertTeamIntoPad(pad: Pad, nowMs: number, where: "NOW" | "ONDECK" | "END", team: Team) {
+  if (where === "NOW") {
+    if (pad.onDeck) pad.standby.unshift(pad.onDeck);
+    if (pad.now) pad.onDeck = pad.now;
+    pad.now = team;
+    clearArrivalForNow(pad);
+    startReportTimerForNow(pad, nowMs);
+    return;
+  }
+
+  if (where === "ONDECK") {
+    if (pad.onDeck) pad.standby.unshift(pad.onDeck);
+    pad.onDeck = team;
+    pad.updatedAt = nowMs;
+    return;
+  }
+
+  pad.standby.push(team);
+  pad.updatedAt = nowMs;
+}
+
+function moveItem<T>(arr: T[], from: number, to: number): T[] {
+  const a = arr.slice();
+  if (from < 0 || from >= a.length) return a;
+  const [item] = a.splice(from, 1);
+  const clamped = Math.max(0, Math.min(a.length, to));
+  a.splice(clamped, 0, item);
+  return a;
+}
+
+function extractTeamFromPad(pad: Pad, teamId: string): { team: Team | null; from: "NOW" | "ONDECK" | "STANDBY" | null } {
+  if (pad.now?.id === teamId) {
+    const t = pad.now;
+    pad.now = null;
+    return { team: t, from: "NOW" };
+  }
+  if (pad.onDeck?.id === teamId) {
+    const t = pad.onDeck;
+    pad.onDeck = null;
+    return { team: t, from: "ONDECK" };
+  }
+  const idx = (pad.standby ?? []).findIndex((t) => t.id === teamId);
+  if (idx >= 0) {
+    const t = pad.standby[idx];
+    pad.standby = (pad.standby ?? []).filter((x) => x.id !== teamId);
+    return { team: t, from: "STANDBY" };
+  }
+  return { team: null, from: null };
+}
+
+function advanceWithoutComplete(pad: Pad, nowMs: number) {
+  const nextNow = pad.onDeck ?? null;
+  const nextOnDeck = pad.standby.length > 0 ? pad.standby[0] : null;
+  const nextStandby = pad.standby.length > 0 ? pad.standby.slice(1) : [];
+
+  pad.now = nextNow;
+  pad.onDeck = nextOnDeck;
+  pad.standby = nextStandby;
+
+  clearArrivalForNow(pad);
+  pad.breakStartAt = null;
+  startReportTimerForNow(pad, nowMs);
+}
+
+/** ---------- COMM helpers ---------- */
+function getCommSnapshot(): CommSnapshot {
+  ensureGlobals();
+  const judges: JudgePresence[] = Array.from(
+  (G.commJudges.values() as Iterable<JudgePresence>)
+)
+  .slice()
+  .sort((a, b) => a.connectedAt - b.connectedAt);
+
+
+  const chats: Record<string, ChatMessage[]> = {};
+  for (const j of judges) {
+    chats[j.socketId] = (G.commChats.get(j.socketId) ?? []).slice(-120);
+  }
+  return { judges, chats };
+}
+
+function emitComm(io: IOServer) {
+  const snap = getCommSnapshot();
+  io.emit("comm:snapshot", snap);
+}
+
+function appendChat(io: IOServer, judgeSocketId: string, msg: ChatMessage) {
+  ensureGlobals();
+  const cur = G.commChats.get(judgeSocketId) ?? [];
+  cur.push(msg);
+  if (cur.length > MAX_CHAT_PER_JUDGE) cur.splice(0, cur.length - MAX_CHAT_PER_JUDGE);
+  G.commChats.set(judgeSocketId, cur);
+  emitComm(io);
+}
+
+export default function handler(req: NextApiRequest, res: NextResWithSocket) {
+  ensureGlobals();
+
+  if (!res.socket.server.io) {
+    const io = new IOServer(res.socket.server, {
+      path: "/api/socket/io",
+      addTrailingSlash: false,
+    });
+
+    res.socket.server.io = io;
+    G.io = io;
+
+    const emitState = () => {
+      loadStateIfNeeded();
+      sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+      io.emit("state", G.boardState);
+      io.emit("audit", G.audit);
+    };
+
+    io.on("connection", (socket) => {
+      loadStateIfNeeded();
+      sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+
+      socket.emit("state", G.boardState);
+      socket.emit("audit", G.audit);
+
+      // send comm snapshot to new connection
+      socket.emit("comm:snapshot", getCommSnapshot());
+
+      const doLoadRoster = () => {
+        const nowMs = Date.now();
+        const prev = G.boardState as BoardState;
+
+        try {
+          const built = buildStateFromRosterCsv();
+
+          if (built) {
+            built.globalBreakStartAt = prev.globalBreakStartAt ?? null;
+            built.globalBreakUntilAt = prev.globalBreakUntilAt ?? null;
+            built.globalBreakReason = prev.globalBreakReason ?? null;
+
+            built.globalMessage = prev.globalMessage ?? null;
+            built.globalMessageUntilAt = prev.globalMessageUntilAt ?? null;
+
+            built.schedule = prev.schedule ?? [];
+            built.scheduleUpdatedAt = prev.scheduleUpdatedAt ?? nowMs;
+            (built as any).eventHeaderLabel = (prev as any).eventHeaderLabel ?? "COMPETITION MATRIX";
+
+            G.boardState = built;
+            G.rosterLoaded = true;
+
+            sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+            pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD", detail: "Roster loaded from CSV." });
+            emitState();
+            return;
+          }
+
+          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_FAIL", detail: "Roster load returned null; no changes." });
+          emitState();
+        } catch (e: any) {
+          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_ERROR", detail: `Roster load error: ${String(e?.message ?? e)}` });
+          emitState();
+        }
+      };
+
+      // =========================
+      // COMM: REGISTER / PRESENCE
+      // =========================
+      socket.on("comm:register", (payload: any) => {
+        ensureGlobals();
+        const nowMs = Date.now();
+        const role = String(payload?.role ?? "").toLowerCase() as CommRole;
+
+        if (role === "admin") {
+          G.commAdmins.add(socket.id);
+          (socket as any).data = (socket as any).data ?? {};
+          (socket as any).data.commRole = "admin";
+          emitComm(io);
+          return;
+        }
+
+        if (role === "judge") {
+          const padId = payload?.padId != null ? Number(payload.padId) : null;
+          const name = payload?.name != null ? String(payload.name).trim() : null;
+
+          const prev = G.commJudges.get(socket.id);
+          const base: JudgePresence = prev ?? {
+            socketId: socket.id,
+            connectedAt: nowMs,
+            lastSeenAt: nowMs,
+            padId: Number.isFinite(padId as any) ? Math.floor(padId as any) : null,
+            name: name || null,
+          };
+
+          base.lastSeenAt = nowMs;
+          base.padId = Number.isFinite(padId as any) ? Math.floor(padId as any) : base.padId;
+          if (name) base.name = name;
+
+          G.commJudges.set(socket.id, base);
+          (socket as any).data = (socket as any).data ?? {};
+          (socket as any).data.commRole = "judge";
+
+          emitComm(io);
+        }
+      });
+
+      socket.on("comm:presence", (payload: any) => {
+        ensureGlobals();
+        const nowMs = Date.now();
+
+        // only judges update presence
+        const rec = G.commJudges.get(socket.id);
+        if (!rec) return;
+
+        const padId = payload?.padId != null ? Number(payload.padId) : null;
+        const name = payload?.name != null ? String(payload.name).trim() : null;
+
+        rec.lastSeenAt = nowMs;
+        rec.padId = Number.isFinite(padId as any) ? Math.floor(padId as any) : rec.padId;
+        if (name) rec.name = name;
+
+        G.commJudges.set(socket.id, rec);
+        emitComm(io);
+      });
+
+      // =========================
+      // COMM: CHAT (admin -> judge)
+      // =========================
+      socket.on("admin:comm:send", (payload: any) => {
+        ensureGlobals();
+        const toJudgeId = String(payload?.toJudgeId ?? "").trim();
+        const text = String(payload?.text ?? "").trim();
+        if (!toJudgeId || !text) return;
+
+        // only allow sending to known judge channels
+        if (!G.commJudges.has(toJudgeId)) return;
+
+        const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text };
+        appendChat(io, toJudgeId, msg);
+      });
+
+      // judge -> admin (their own channel)
+      socket.on("judge:comm:send", (payload: any) => {
+        ensureGlobals();
+        const text = String(payload?.text ?? "").trim();
+        if (!text) return;
+
+        // judge must be registered
+        if (!G.commJudges.has(socket.id)) return;
+
+        const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "JUDGE", text };
+        appendChat(io, socket.id, msg);
+      });
+
+      // =========================
+      // COMM: BROADCAST (admin -> judges)
+      // target = ALL | PAD
+      // =========================
+      socket.on("admin:comm:broadcast", (payload: any) => {
+        ensureGlobals();
+        const text = String(payload?.text ?? "").trim();
+        if (!text) return;
+
+        const target = String(payload?.target ?? "ALL").toUpperCase();
+        const padId = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
+
+        const ttlSeconds = Math.max(20, Math.min(60 * 30, Number(payload?.ttlSeconds ?? 120))); // clamp 20s..30m
+        const broadcast = {
+          id: uid(),
+          ts: Date.now(),
+          text,
+          target,
+          padId: Number.isFinite(padId as any) ? (padId as any) : null,
+          ttlSeconds,
+        };
+
+        const judges: JudgePresence[] = Array.from(
+          (G.commJudges.values() as Iterable<JudgePresence>)
+        );
+
+        const recipients: JudgePresence[] =
+          target === "PAD" && Number.isFinite(padId as any)
+            ? judges.filter((j) => j.padId === padId)
+            : judges;
+
+        for (const j of recipients) {
+          io.to(j.socketId).emit("comm:broadcast", broadcast);
+          // also log into their chat history (so admin can see it later)
+          const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text: `📣 BROADCAST: ${text}` };
+          const cur = G.commChats.get(j.socketId) ?? [];
+          cur.push(msg);
+          if (cur.length > MAX_CHAT_PER_JUDGE) cur.splice(0, cur.length - MAX_CHAT_PER_JUDGE);
+          G.commChats.set(j.socketId, cur);
+        }
+
+        emitComm(io);
+      });
+
+      socket.on("disconnect", () => {
+        ensureGlobals();
+        // cleanup admin
+        G.commAdmins.delete(socket.id);
+
+        // cleanup judge
+        if (G.commJudges.has(socket.id)) {
+          G.commJudges.delete(socket.id);
+          // keep chat history (optional). If you want to remove it:
+          // G.commChats.delete(socket.id);
+        }
+
+        emitComm(io);
+      });
+
+      // =========================
+      // ADMIN: PADS ENSURE (CSV import)
+      // =========================
+      socket.on("admin:pads:ensure", ({ maxPadId, namePrefix, labelPrefix }: any) => {
+        if (!G.boardState) return;
+        const st = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const existing = new Set((st.pads ?? []).map((p) => p.id));
+        const target = Math.max(0, Math.floor(Number(maxPadId) || 0));
+        if (target <= 0) return;
+
+        for (let id = 1; id <= target; id++) {
+          if (existing.has(id)) continue;
+
+          const pad = createPad({
+            id,
+            nowMs,
+            name: namePrefix ? `${String(namePrefix)} ${id}` : undefined,
+            label: labelPrefix ? `${String(labelPrefix)} ${id}` : undefined,
+            seedDemoTeams: false,
+          });
+
+          st.pads.push(pad);
+          existing.add(id);
+        }
+
+        st.nextPadId = Math.max(st.nextPadId ?? 1, target + 1);
+        st.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "PADS_ENSURE", detail: `Ensured areas 1..${target}` });
+        emitState();
+      });
+
+      // =========================
+      // ADMIN: AREA CRUD
+      // =========================
+      socket.on("admin:pad:add", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const name = payload?.name ? String(payload.name) : undefined;
+        const label = payload?.label ? String(payload.label) : undefined;
+
+        const id = state.nextPadId ?? 1;
+
+        const pad = createPad({
+          id,
+          nowMs,
+          name: name ?? `Area ${id}`,
+          label: label ?? `Area ${id}`,
+          seedDemoTeams: false,
+        });
+
+        state.pads = [...(state.pads ?? []), pad];
+        state.nextPadId = id + 1;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: id, action: "AREA_ADD", detail: `Added area: ${pad.name} (${pad.label})` });
+        emitState();
+      });
+
+      socket.on("admin:pad:update", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+
+        const name = payload?.name != null ? String(payload.name).trim() : null;
+        const label = payload?.label != null ? String(payload.label).trim() : null;
+
+        if (name !== null && name.length > 0) pad.name = name;
+        if (label !== null && label.length > 0) pad.label = label;
+
+        pad.updatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "AREA_UPDATE", detail: `Updated area: ${pad.name} (${pad.label})` });
+        emitState();
+      });
+
+      socket.on("admin:pad:delete", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        delete G.padHistory?.[`__stack_${padId}`];
+
+        state.pads = (state.pads ?? []).filter((p) => p.id !== padId);
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "AREA_DELETE", detail: `Deleted area: ${pad.name}` });
+        emitState();
+      });
+
+      // =========================
+      // ADMIN: CLEAR ALL QUEUES (hard reset)
+      // =========================
+      socket.on("admin:clearAllQueues", () => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        (state.pads ?? []).forEach((p) => clearPad(p, nowMs));
+        state.updatedAt = nowMs;
+
+        pushAudit({
+          ts: nowMs,
+          padId: null,
+          action: "CLEAR_ALL",
+          detail: "Cleared all queues across all areas.",
+        });
+
+        emitState();
+      });
+
+      // =========================
+      // ADMIN: LOAD/RELOAD ROSTER
+      // =========================
+      socket.on("admin:loadRoster", () => doLoadRoster());
+      socket.on("admin:reloadRoster", () => doLoadRoster());
+
+      // =========================
+      // ADMIN: ADD PARTICIPANT (new)
+      // =========================
+      socket.on("admin:team:add", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const where = String(payload?.where ?? "END").toUpperCase();
+        const teamName = String(payload?.teamName ?? "").trim();
+        if (!teamName) return;
+
+        snapshotForUndo(padId);
+
+        const teamId = String(payload?.teamId ?? uid()).trim();
+        const team: Team = {
+          id: teamId,
+          name: teamName,
+          unit: payload?.unit ? String(payload.unit) : undefined,
+          category: payload?.category ? String(payload.category) : undefined,
+          division: payload?.division === "Jr" || payload?.division === "Sr" ? payload.division : undefined,
+          tag: "MANUAL",
+        };
+
+        const whereSafe: "NOW" | "ONDECK" | "END" = where === "NOW" ? "NOW" : where === "ONDECK" ? "ONDECK" : "END";
+
+        insertTeamIntoPad(pad, nowMs, whereSafe, team);
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId, action: "ADMIN_TEAM_ADD", detail: `Added participant (${whereSafe}): ${team.name} (${team.id})` });
+        emitState();
+      });
+
+      // =========================
+      // ADMIN: QUEUE MANAGER (linked NOW/ONDECK/STBY)
+      // =========================
+
+      socket.on("admin:standby:move", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const from = Number(payload?.from);
+        const to = Number(payload?.to);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+
+        const len = pad.standby?.length ?? 0;
+        if (len <= 1) return;
+
+        snapshotForUndo(padId);
+
+        pad.standby = moveItem(pad.standby ?? [], Math.floor(from), Math.floor(to));
+        pad.updatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "STANDBY_MOVE", detail: `Moved standby index ${from} -> ${to}` });
+        emitState();
+      });
+
+      socket.on("admin:queue:setSlot", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const teamId = String(payload?.teamId ?? "").trim();
+        const target = String(payload?.target ?? "").toUpperCase();
+        if (!teamId) return;
+        if (target !== "NOW" && target !== "ONDECK") return;
+
+        if (target === "ONDECK" && pad.onDeck?.id === teamId) return;
+        if (target === "NOW" && pad.now?.id === teamId) return;
+
+        snapshotForUndo(padId);
+
+        if (target === "NOW" && pad.onDeck?.id === teamId) {
+          swapNowOnDeck(pad, nowMs);
+          state.updatedAt = nowMs;
+          pushAudit({ ts: nowMs, padId, action: "QUEUE_SET_NOW", detail: `NOW set from ONDECK via swap` });
+          emitState();
+          return;
+        }
+
+        const { team } = extractTeamFromPad(pad, teamId);
+        if (!team) return;
+
+        insertTeamIntoPad(pad, nowMs, target as any, team);
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId, action: "QUEUE_SET_SLOT", detail: `Set ${target}: ${team.name} (${team.id})` });
+        emitState();
+      });
+
+      socket.on("admin:queue:demote", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const from = String(payload?.from ?? "").toUpperCase();
+        const to = String(payload?.to ?? "END").toUpperCase();
+
+        if (from !== "NOW" && from !== "ONDECK") return;
+        if (to !== "TOP" && to !== "END") return;
+
+        snapshotForUndo(padId);
+
+        if (from === "NOW") {
+          const moved = pad.now;
+          if (!moved) return;
+
+          if (to === "TOP") pad.standby.unshift(moved);
+          else pad.standby.push(moved);
+
+          advanceWithoutComplete(pad, nowMs);
+
+          state.updatedAt = nowMs;
+          pushAudit({ ts: nowMs, padId, action: "QUEUE_DEMOTE_NOW", detail: `Demoted NOW to STBY ${to}` });
+          emitState();
+          return;
+        }
+
+        const moved = pad.onDeck;
+        if (!moved) return;
+
+        if (to === "TOP") pad.standby.unshift(moved);
+        else pad.standby.push(moved);
+
+        pad.onDeck = pad.standby.length > 0 ? pad.standby.shift() ?? null : null;
+        pad.updatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "QUEUE_DEMOTE_ONDECK", detail: `Demoted ONDECK to STBY ${to}` });
+        emitState();
+      });
+
+      socket.on("admin:queue:swap", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        swapNowOnDeck(pad, nowMs);
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId, action: "QUEUE_SWAP", detail: "Swapped NOW/ONDECK" });
+        emitState();
+      });
+
+      socket.on("admin:queue:updateTeam", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const teamId = String(payload?.teamId ?? "").trim();
+        const patch = payload?.patch ?? {};
+        if (!teamId || !patch || typeof patch !== "object") return;
+
+        const allIds = new Set<string>();
+        if (pad.now?.id) allIds.add(pad.now.id);
+        if (pad.onDeck?.id) allIds.add(pad.onDeck.id);
+        (pad.standby ?? []).forEach((t) => allIds.add(t.id));
+        if (!allIds.has(teamId)) return;
+
+        snapshotForUndo(padId);
+
+        const applyPatch = (t: Team) => {
+          if (patch.id != null) {
+            const newId = String(patch.id).trim();
+            if (newId && newId !== t.id) {
+              const dup = (pad.now?.id === newId) || (pad.onDeck?.id === newId) || (pad.standby ?? []).some((x) => x.id === newId);
+              if (!dup) t.id = newId;
+            }
+          }
+          if (patch.name != null) {
+            const newName = String(patch.name).trim();
+            if (newName) t.name = newName;
+          }
+          if (patch.unit != null) t.unit = String(patch.unit).trim() || undefined;
+          if (patch.category != null) t.category = String(patch.category).trim() || undefined;
+          if (patch.division === "Jr" || patch.division === "Sr") t.division = patch.division;
+          if (patch.tag != null) t.tag = String(patch.tag);
+        };
+
+        if (pad.now?.id === teamId) applyPatch(pad.now);
+        if (pad.onDeck?.id === teamId) applyPatch(pad.onDeck);
+        const idx = (pad.standby ?? []).findIndex((t) => t.id === teamId);
+        if (idx >= 0) applyPatch(pad.standby[idx]);
+
+        pad.updatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "QUEUE_UPDATE_TEAM", detail: `Updated team: ${teamId}` });
+        emitState();
+      });
+
+      socket.on("admin:standby:remove", (payload: any) => {
+        const nowMs = Date.now();
+        const state = G.boardState as BoardState;
+
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const teamId = String(payload?.teamId ?? "").trim();
+        if (!teamId) return;
+
+        const idx = (pad.standby ?? []).findIndex((t) => t.id === teamId);
+        if (idx < 0) return;
+
+        snapshotForUndo(padId);
+
+        const removed = pad.standby[idx];
+        pad.standby = (pad.standby ?? []).filter((t) => t.id !== teamId);
+
+        pad.updatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "STANDBY_REMOVE", detail: `Removed standby: ${removed.name} (${removed.id})` });
+        emitState();
+      });
+
+      // =========================
+      // JUDGE EVENTS (unchanged)
+      // =========================
+      socket.on("judge:complete", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const gbUntil = state.globalBreakUntilAt ?? null;
+        const gbStart = state.globalBreakStartAt ?? null;
+        const globalBreakActive = (!gbStart || nowMs >= gbStart) && !!gbUntil && nowMs < gbUntil;
+        if (globalBreakActive) {
+          pushAudit({ ts: nowMs, padId, action: "COMPLETE_BLOCKED", detail: "Blocked by global break." });
+          return emitState();
+        }
+
+        snapshotForUndo(padId);
+
+        const runStart = pad.runStartedAt ?? pad.nowArrivedAt ?? null;
+        const durationSec = runStart ? (nowMs - runStart) / 1000 : null;
+
+        const prevNowName = pad.now?.name ?? "—";
+
+        pad.lastCompleteAt = nowMs;
+        pad.lastRunEndedAt = nowMs;
+
+        const nextNow = pad.onDeck ?? null;
+        const nextOnDeck = pad.standby.length > 0 ? pad.standby[0] : null;
+        const nextStandby = pad.standby.length > 0 ? pad.standby.slice(1) : [];
+
+        pad.now = nextNow;
+        pad.onDeck = nextOnDeck;
+        pad.standby = nextStandby;
+
+        clearArrivalForNow(pad);
+        pad.breakStartAt = null;
+
+        startReportTimerForNow(pad, nowMs);
+
+        if (durationSec !== null) updateCycleStats(state, pad, durationSec, nowMs);
+
+        state.updatedAt = nowMs;
+
+        pushAudit({
+          ts: nowMs,
+          padId,
+          action: "COMPLETE",
+          detail: `Completed. Prev NOW: ${prevNowName}. New NOW: ${pad.now?.name ?? "—"}`,
+        });
+
+        emitState();
+      });
+
+      socket.on("judge:hold", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+
+        pad.note = "HOLD";
+        setStatus(pad, "HOLD", nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "HOLD", detail: "Hold set." });
+        emitState();
+      });
+
+      socket.on("judge:dns", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        markNowTeam(pad, "DNS", nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "DNS", detail: "Marked NOW DNS." });
+        emitState();
+      });
+
+      socket.on("judge:dq", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        markNowTeam(pad, "DQ", nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "DQ", detail: "Marked NOW DQ." });
+        emitState();
+      });
+
+      socket.on("judge:undo", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const ok = undoForPad(padId);
+        if (G.boardState) (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "UNDO", detail: ok ? "Undo successful." : "Undo not available." });
+        emitState();
+      });
+
+      socket.on("judge:arrived", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        markArrived(pad, nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "ARRIVED", detail: "Marked arrived." });
+        emitState();
+      });
+
+      socket.on("judge:swap", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        swapNowOnDeck(pad, nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "SWAP", detail: "Swapped NOW/ONDECK." });
+        emitState();
+      });
+
+      socket.on("judge:skipOnDeck", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        skipOnDeck(pad, nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "SKIP_ON_DECK", detail: "Moved ONDECK to standby end." });
+        emitState();
+      });
+
+      socket.on("judge:clear", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+        clearPad(pad, nowMs);
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "CLEAR_PAD", detail: "Cleared area queue." });
+        emitState();
+      });
+
+      socket.on("judge:startBreak", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const gbUntil = state.globalBreakUntilAt ?? null;
+        const gbStart = state.globalBreakStartAt ?? null;
+        const globalBreakActive = (!gbStart || nowMs >= gbStart) && !!gbUntil && nowMs < gbUntil;
+        if (globalBreakActive) {
+          pushAudit({ ts: nowMs, padId, action: "BREAK_BLOCKED", detail: "Blocked by global break." });
+          return emitState();
+        }
+
+        snapshotForUndo(padId);
+
+        const minutes = Number(payload?.minutes ?? 10);
+        const reason = String(payload?.reason ?? "Break");
+        const until = nowMs + Math.max(1, minutes) * 60 * 1000;
+
+        pad.breakUntilAt = until;
+        pad.breakReason = reason;
+        pad.note = `BREAK: ${reason}`;
+
+        if (pad.now?.id) {
+          pad.reportByTeamId = pad.now.id;
+          pad.reportByDeadlineAt = until;
+        } else {
+          pad.reportByTeamId = null;
+          pad.reportByDeadlineAt = null;
+        }
+
+        setStatus(pad, "BREAK", nowMs);
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "BREAK_START", detail: `Break started: ${minutes} min (${reason})` });
+        emitState();
+      });
+
+      socket.on("judge:endBreak", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        snapshotForUndo(padId);
+
+        pad.breakUntilAt = null;
+        pad.breakReason = null;
+        pad.note = "";
+
+        if (isArrivedForNow(pad)) {
+          pad.reportByTeamId = null;
+          pad.reportByDeadlineAt = null;
+          setStatus(pad, "ON_PAD", nowMs);
+        } else if (pad.now) {
+          const nowId = pad.now.id;
+          const hasValidDeadline = !!pad.reportByDeadlineAt && !!pad.reportByTeamId && pad.reportByTeamId === nowId;
+          if (!hasValidDeadline) startReportTimerForNow(pad, nowMs);
+          else setStatus(pad, "REPORTING", nowMs);
+        } else {
+          pad.reportByTeamId = null;
+          pad.reportByDeadlineAt = null;
+          setStatus(pad, "IDLE", nowMs);
+        }
+
+        (G.boardState as BoardState).updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId, action: "BREAK_END", detail: "Break ended" });
+        emitState();
+      });
+
+      socket.on("judge:addTeam", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const where = String(payload?.where ?? "END").toUpperCase();
+        const teamName = String(payload?.teamName ?? "").trim();
+        if (!teamName) return;
+
+        snapshotForUndo(padId);
+
+        const teamId = String(payload?.teamId ?? uid()).trim();
+        const team: Team = {
+          id: teamId,
+          name: teamName,
+          unit: payload?.unit ? String(payload.unit) : undefined,
+          category: payload?.category ? String(payload.category) : undefined,
+          division: payload?.division === "Jr" || payload?.division === "Sr" ? payload.division : undefined,
+          tag: "MANUAL",
+        };
+
+        const whereSafe: "NOW" | "ONDECK" | "END" = where === "NOW" ? "NOW" : where === "ONDECK" ? "ONDECK" : "END";
+
+        insertTeamIntoPad(pad, nowMs, whereSafe, team);
+
+        (G.boardState as BoardState).updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId, action: "MANUAL_ADD", detail: `Added participant (${whereSafe}): ${team.name} (${team.id})` });
+        emitState();
+      });
+
+      socket.on("judge:setPadLabel", (payload: any) => {
+        const padId = resolvePadId(payload);
+        if (padId == null) return;
+
+        const nowMs = Date.now();
+        const pad = getPadById(padId);
+        if (!pad) return;
+
+        const label = String(payload?.label ?? "").trim();
+        if (!label) return;
+
+        snapshotForUndo(padId);
+
+        pad.label = label;
+        pad.updatedAt = nowMs;
+        (G.boardState as BoardState).updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId, action: "SET_LABEL", detail: `Set label: ${label}` });
+        emitState();
+      });
+
+      // =========================
+      // SCHEDULE CRUD (admin)
+      // =========================
+      socket.on("admin:schedule:setAll", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const list = normalizeSchedule(payload?.schedule);
+        state.schedule = list;
+        state.scheduleUpdatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_SET_ALL", detail: `Schedule replaced (${list.length} blocks)` });
+        emitState();
+      });
+
+      socket.on("admin:schedule:add", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const e = payload?.event as Partial<ScheduleEvent> | undefined;
+        if (!e) return;
+
+        const event: ScheduleEvent = {
+          id: (e as any).id ? String((e as any).id) : uid(),
+          title: String(e.title ?? "Untitled"),
+          type: (e.type as any) ?? "OTHER",
+          scope: (e.scope as any) ?? "GLOBAL",
+          padIds: e.scope === "PAD" ? (Array.isArray(e.padIds) ? e.padIds.map((n) => Number(n)) : []) : undefined,
+          startAt: Number(e.startAt ?? 0),
+          endAt: Number(e.endAt ?? 0),
+          notes: e.notes ? String(e.notes) : undefined,
+          affectedCategories: Array.isArray(e.affectedCategories) ? e.affectedCategories : undefined,
+          createdAt: nowMs,
+          updatedAt: nowMs,
+        };
+
+        state.schedule = normalizeSchedule([...(state.schedule ?? []), event]);
+        state.scheduleUpdatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_ADD", detail: `Added block: ${event.title}` });
+        emitState();
+      });
+
+      socket.on("admin:schedule:update", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const id = String(payload?.id ?? "");
+        const patch = payload?.patch as Partial<ScheduleEvent> | undefined;
+        if (!id || !patch) return;
+
+        const next = (state.schedule ?? []).map((e) => (e.id === id ? { ...e, ...patch, updatedAt: nowMs } : e));
+        state.schedule = normalizeSchedule(next);
+        state.scheduleUpdatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_UPDATE", detail: `Updated block: ${id}` });
+        emitState();
+      });
+
+      socket.on("admin:schedule:delete", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const id = String(payload?.id ?? "");
+        if (!id) return;
+
+        state.schedule = normalizeSchedule((state.schedule ?? []).filter((e) => e.id !== id));
+        state.scheduleUpdatedAt = nowMs;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_DELETE", detail: `Deleted block: ${id}` });
+        emitState();
+      });
+
+      // =========================
+      // GLOBAL MESSAGE / BREAK (admin)
+      // =========================
+      socket.on("admin:setGlobalMessage", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const text = String(payload?.text ?? "").trim();
+        const minutes = payload?.minutes != null ? Number(payload.minutes) : null;
+
+        state.globalMessage = text || null;
+        state.globalMessageUntilAt = text && minutes && Number.isFinite(minutes) ? nowMs + Math.max(1, minutes) * 60 * 1000 : null;
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "GLOBAL_MESSAGE_SET", detail: text ? `Message set (${minutes ?? "∞"}m)` : "Message cleared" });
+        emitState();
+      });
+
+      socket.on("admin:clearGlobalMessage", () => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+        state.globalMessage = null;
+        state.globalMessageUntilAt = null;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "GLOBAL_MESSAGE_CLEAR", detail: "Global message cleared" });
+        emitState();
+      });
+
+      // =========================
+      // EVENT HEADER LABEL (admin)
+      // =========================
+      socket.on("admin:setEventHeaderLabel", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const text = String(payload?.text ?? "").trim();
+        (state as any).eventHeaderLabel = text || "COMPETITION MATRIX";
+
+        state.updatedAt = nowMs;
+
+        pushAudit({
+          ts: nowMs,
+          padId: null,
+          action: "EVENT_HEADER_SET",
+          detail: `Header set: ${(state as any).eventHeaderLabel}`,
+        });
+
+        emitState();
+      });
+
+      socket.on("admin:startGlobalBreak", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const minutes = Number(payload?.minutes ?? 60);
+        const reason = String(payload?.reason ?? "Break");
+
+        state.globalBreakStartAt = nowMs;
+        state.globalBreakUntilAt = nowMs + Math.max(1, minutes) * 60 * 1000;
+        state.globalBreakReason = reason;
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "GLOBAL_BREAK_START", detail: `Global break started (${minutes}m): ${reason}` });
+        emitState();
+      });
+
+      socket.on("admin:scheduleGlobalBreak", (payload: any) => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        const startAt = Number(payload?.startAt ?? 0);
+        const minutes = Number(payload?.minutes ?? 60);
+        const reason = String(payload?.reason ?? "Break");
+
+        if (!Number.isFinite(startAt) || startAt <= 0) return;
+
+        state.globalBreakStartAt = startAt;
+        state.globalBreakUntilAt = startAt + Math.max(1, minutes) * 60 * 1000;
+        state.globalBreakReason = reason;
+
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "GLOBAL_BREAK_SCHEDULE", detail: `Global break scheduled @${new Date(startAt).toISOString()} (${minutes}m): ${reason}` });
+        emitState();
+      });
+
+      socket.on("admin:endGlobalBreak", () => {
+        const state = G.boardState as BoardState;
+        const nowMs = Date.now();
+
+        state.globalBreakStartAt = null;
+        state.globalBreakUntilAt = null;
+        state.globalBreakReason = null;
+        state.updatedAt = nowMs;
+
+        pushAudit({ ts: nowMs, padId: null, action: "GLOBAL_BREAK_END", detail: "Global break ended" });
+        emitState();
+      });
+    });
+  } else {
+    loadStateIfNeeded();
+  }
+
+  return res.status(200).json({ ok: true, rosterLoaded: !!G.rosterLoaded });
+}

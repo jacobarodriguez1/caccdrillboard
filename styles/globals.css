@@ -1,8 +1,34 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================
+   CACC + App Theme Tokens
+   ========================= */
 :root {
+  /* Your original variables (kept) */
   --background: #ffffff;
   --foreground: #171717;
+
+  /* CACC Brand */
+  --cacc-navy: #0b1f3a; /* PMS 282-ish */
+  --cacc-gold: #ffc72c; /* PMS 116-ish */
+
+  /* Functional / Status */
+  --success: #1e8e3e;
+  --warning: #f4a100;
+  --danger: #c62828;
+  --info: #1565c0;
+
+  /* Neutrals */
+  --gray-900: #1f2937;
+  --gray-500: #6b7280;
+  --gray-100: #f3f4f6;
+  --white: #ffffff;
 }
 
+/* Your existing dark-mode behavior (kept) */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -14,16 +40,22 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
+  height: 100%;
 }
 
+/* IMPORTANT:
+   Public board should look like ops-board by default.
+   If you want ONLY the public board to be navy, you can change this later,
+   but for now we set the app to navy background to match your spec. */
 body {
   color: var(--foreground);
-  background: var(--background);
+  background: var(--cacc-navy);
   font-family: Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Resets */
 * {
   box-sizing: border-box;
   padding: 0;
@@ -35,8 +67,27 @@ a {
   text-decoration: none;
 }
 
+/* Keep this if you want browser form controls styled for dark mode */
 @media (prefers-color-scheme: dark) {
   html {
     color-scheme: dark;
   }
+}
+
+/* =========================
+   Flashing utility for "LATE"
+   ========================= */
+@keyframes flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Apply this class to any element you want to flash */
+.flash {
+  animation: flash 1s infinite;
 }
