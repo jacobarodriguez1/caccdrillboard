@@ -1,110 +1,159 @@
-# CACC Drill Board
+CACC Drill Board
 
-A real-time drill management and roster system built with Next.js and TypeScript.
+A real-time drill competition and roster management platform built with Next.js and TypeScript.
 
-This application was designed to support drill coordination, roster tracking, and live state updates for structured training environments.
+Designed for structured competition environments requiring synchronized state, multi-role access, and broadcast-ready visibility.
 
----
+🚀 Overview
 
-## 🚀 Overview
+CACC Drill Board is a real-time web platform that provides:
 
-CACC Drill Board is a web-based platform that enables:
+Live competition area (pad) management
 
-- Real-time board state updates
-- Drill roster management
-- Role-based access (Admin / Judge / Public views)
-- Socket-based live synchronization
-- Structured data handling via API routes
+Dynamic roster import and assignment
 
-The system is designed to support organized training environments where visibility, timing, and structured control are critical.
+Real-time synchronization via WebSockets
 
----
+Role-based operational interfaces (Admin / Judge / Public)
 
-## 🏗 Tech Stack
+Persistent communication channels between Admin and Judges
 
-- **Next.js**
-- **React**
-- **TypeScript**
-- **Node.js**
-- **WebSockets**
-- **REST API Routes**
-- **ESLint**
+Structured scheduling with global and per-pad events
 
----
+Soft ETA modeling and cycle tracking
 
-## 📁 Project Structure
+Audit logging of system actions
 
-```
-components/     → Reusable UI components  
-lib/            → State logic, socket client, utilities  
-pages/          → Application routes and API endpoints  
-public/         → Static assets  
-styles/         → Global styling  
-data/           → Drill roster CSV data  
-```
+Broadcast-optimized public display mode
 
----
+The system is built for environments where timing precision, queue control, and high-visibility coordination are critical.
 
-## 🔐 Role-Based Views
+🏗 Tech Stack
 
-- **Public View** – Displays board state
-- **Judge View** – Interaction layer for scoring or control
-- **Admin View** – Authentication, roster reload, and board management
+Next.js
 
----
+React
 
-## 📡 API Endpoints
+TypeScript
 
-- `/api/state` – Returns current board state
-- `/api/socket` – WebSocket connection handler
-- `/api/admin-login`
-- `/api/admin-logout`
-- `/api/reload-roster`
+Node.js
 
----
+Socket.IO (WebSockets)
 
-## 💡 Purpose
+REST API routes
 
-This project demonstrates:
+CSV-based roster ingestion
 
-- Real-time state synchronization
-- Modular architecture
-- API route structuring
-- Separation of concerns
-- Controlled state management in a multi-role environment
+ESLint
 
----
+Modular component architecture
 
-## 🛠 Local Development
+🧠 Core Capabilities
+Real-Time Board State
 
-```bash
+Pad-based queue management (NOW / ON DECK / STANDBY)
+
+Status states: REPORTING, ON_PAD, RUNNING, HOLD, BREAK, LATE
+
+Global break control
+
+Local pad break control
+
+Live timer updates
+
+Role-Based Interfaces
+
+Public View
+
+Broadcast-ready competition display
+
+Visual status hierarchy
+
+Schedule and global state visibility
+
+Judge View
+
+Operational controls (ARRIVED, COMPLETE, SWAP, DNS, DQ, HOLD)
+
+Local break control
+
+Live chat with Admin (pad-based channel)
+
+Admin View
+
+Dynamic pad creation and management
+
+Queue manipulation (swap, demote, insert)
+
+Roster reload
+
+Global message & break controls
+
+Persistent Admin ↔ Judge communication
+
+Urgent message acknowledgment tracking
+
+📡 Communication System
+
+Pad-based Admin ↔ Judge chat channels
+
+Urgent message flagging
+
+Judge acknowledgment tracking
+
+Persistent state with atomic write protection
+
+Debounced disk persistence
+
+📁 Project Structure
+
+components/ → Shared UI components and layout system
+lib/ → Core state logic, persistence, socket utilities
+pages/ → Application routes and API endpoints
+public/ → Static assets
+styles/ → Global styling and design tokens
+data/ → Roster CSV (excluded from persistence state)
+
+🔐 API Endpoints
+
+/api/state – Returns current board state
+/api/socket – WebSocket handler (live sync + comm system)
+/api/admin-login – Admin authentication
+/api/admin-logout
+/api/reload-roster – Rebuild state from CSV
+
+💡 Architectural Highlights
+
+Dynamic pad system (not hardcoded 1–8)
+
+Safe state sanitization on load
+
+Type-safe socket handlers
+
+Atomic persistence pattern (tmp → rename)
+
+Luminance-based UI hierarchy system
+
+Separation of display, operational, and control modes
+
+🛠 Local Development
+
 npm install
 npm run dev
-```
 
 Visit:
-
-```
 http://localhost:3000
-```
 
----
+📈 Roadmap
 
-## 📈 Future Improvements
+Database-backed persistence
 
-- Persistent database storage
-- Authentication hardening
-- Audit logging
-- Deployment configuration (Vercel / Docker)
-- Role permission refinement
+Stronger authentication enforcement
 
----
+Expanded audit reporting
 
-## 👤 Author
+Deployment automation (Vercel / Docker)
 
-Jacob A. Rodriguez  
-Assistant S-3 (Training Officer), California Cadet Corps  
-MBA – Organizational Leadership  
+Permission refinement
 
----
-
+Metrics dashboard
