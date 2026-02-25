@@ -562,16 +562,21 @@ export default function JudgeConsole() {
         @keyframes lateFlash { 0%{opacity:1} 50%{opacity:.55} 100%{opacity:1} }
         @keyframes urgentFlash { 0%,100%{background:rgba(220,53,69,0.25)} 50%{background:rgba(220,53,69,0.45)} }
 
-        .layout {
+        .layout.judge-layout {
           display: grid;
           grid-template-columns: 220px minmax(0, 1fr) 360px;
           gap: 14px;
           margin-top: 14px;
         }
-        @media (max-width: 1180px) {
-          .layout { grid-template-columns: 220px minmax(0, 1fr); }
-          .toolsCol { display: none; }
-          .toolsToggle { display: inline-flex; }
+        @media (min-width: 1025px) {
+          .toolsToggle { display: none; }
+        }
+        @media (max-width: 1024px) {
+          .layout.judge-layout { grid-template-columns: 200px minmax(0, 1fr); }
+          .toolsCol.judge-tools-col { display: none; }
+        }
+        @media (max-width: 640px) {
+          .layout.judge-layout { grid-template-columns: 1fr; }
         }
 
         .chatScroll {
@@ -588,6 +593,7 @@ export default function JudgeConsole() {
       `}</style>
 
       <main
+        className="responsive-page"
         style={{
           minHeight: "100vh",
           background: "var(--page-bg)",
@@ -683,7 +689,6 @@ export default function JudgeConsole() {
               onClick={() => setToolsOpen((v) => !v)}
               style={{
                 ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-                display: "none",
               }}
               title="Toggle tools (Ctrl/Cmd+K)"
             >
@@ -759,7 +764,7 @@ export default function JudgeConsole() {
         </div>
 
         {/* Main 3-zone layout */}
-        <div className="layout">
+        <div className="layout judge-layout">
           {/* LEFT: AREA TOGGLE */}
           <aside style={{ ...cardStyle(), padding: 12 }}>
             <div
@@ -1243,7 +1248,7 @@ export default function JudgeConsole() {
 
           {/* RIGHT: Tools */}
           <aside
-            className="toolsCol"
+            className="toolsCol judge-tools-col"
             style={{ display: toolsOpen ? "block" : "none" }}
           >
             <div style={{ ...cardStyle(), padding: 14 }}>

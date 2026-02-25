@@ -37,6 +37,7 @@ export default function LoginPage() {
       </Head>
 
       <main
+        className="responsive-page"
         style={{
           minHeight: "100vh",
           background: "var(--cacc-navy)",
@@ -70,12 +71,14 @@ export default function LoginPage() {
             style={{
               marginTop: 14,
               width: "100%",
-              padding: "12px 12px",
+              padding: "12px 14px",
+              minHeight: 44,
               borderRadius: 12,
               border: "1px solid rgba(255,255,255,0.18)",
               background: "rgba(0,0,0,0.25)",
               color: "white",
               outline: "none",
+              fontSize: 16,
             }}
           />
 
@@ -87,7 +90,8 @@ export default function LoginPage() {
             style={{
               marginTop: 14,
               width: "100%",
-              padding: "12px 12px",
+              padding: "12px 14px",
+              minHeight: 44,
               borderRadius: 12,
               border: "1px solid rgba(255,255,255,0.18)",
               background: "var(--cacc-gold)",

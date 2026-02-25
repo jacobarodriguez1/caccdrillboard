@@ -503,6 +503,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
 
   return (
     <div
+      className="responsive-page"
       style={{
         minHeight: "100vh",
         background: "var(--page-bg)",
@@ -517,6 +518,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
 
       {/* Header (Admin-style) */}
       <div
+        className="public-header"
         style={{
           display: "flex",
           gap: 16,
@@ -532,6 +534,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
         <img
           src="/cacc-shield.png"
           alt="California Cadet Corps"
+          className="public-header-logo"
           style={{
             width: 132,
             height: 132,
@@ -557,6 +560,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
           </div>
 
           <div
+            className="public-header-title"
             style={{
               fontWeight: 1000,
               fontSize: 40,
@@ -747,12 +751,9 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
 
       {/* Grid */}
       <div
+        className={`public-board-grid ${big ? "public-board-grid-big" : ""}`}
         style={{
           marginTop: 14,
-          display: "grid",
-          gridTemplateColumns: big
-            ? "repeat(4, minmax(0, 1fr))"
-            : "repeat(auto-fit, minmax(340px, 1fr))",
           gap: 14,
         }}
       >

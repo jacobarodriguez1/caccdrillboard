@@ -63,6 +63,7 @@ export default function PublicPage() {
       {/* If NOT kiosk, show a button to enter kiosk mode */}
       {!kiosk && (
         <div
+          className="kiosk-entry"
           style={{
             position: "fixed",
             right: 16,
@@ -70,18 +71,22 @@ export default function PublicPage() {
             zIndex: 50,
             display: "flex",
             gap: 10,
+            paddingBottom: "env(safe-area-inset-bottom, 0)",
           }}
         >
           <a
             href="/public?kiosk=1"
             style={{
-              padding: "10px 12px",
+              padding: "12px 16px",
+              minHeight: 44,
               borderRadius: 12,
               background: "var(--cacc-gold)",
               color: "#111",
               fontWeight: 1000,
               textDecoration: "none",
               border: "1px solid rgba(255,255,255,0.20)",
+              display: "inline-flex",
+              alignItems: "center",
             }}
           >
             Enter Kiosk (Fullscreen)

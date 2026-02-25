@@ -933,6 +933,7 @@ export default function AdminPage() {
       </Head>
 
       <main
+        className="responsive-page"
         style={{
           minHeight: "100vh",
           background: "var(--page-bg)",
@@ -945,6 +946,7 @@ export default function AdminPage() {
             Header
            ======================= */}
         <header
+          className="admin-header-inner"
           style={{
             borderRadius: 12,
             background: "var(--surface-1)",
@@ -1068,6 +1070,7 @@ export default function AdminPage() {
           </div>
 
           <div
+            className="admin-header-actions"
             style={{
               display: "flex",
               gap: 10,
@@ -1223,6 +1226,7 @@ export default function AdminPage() {
 
           {/* Broadcast row */}
           <div
+            className="admin-broadcast-grid"
             style={{
               marginTop: 10,
               display: "grid",
@@ -1278,6 +1282,7 @@ export default function AdminPage() {
 
           {/* Channel list + chat */}
           <div
+            className="admin-comm-layout"
             style={{
               marginTop: 12,
               display: "grid",
@@ -1598,13 +1603,13 @@ export default function AdminPage() {
           .dash3 {
             margin-top: 12px;
             display: grid;
-            grid-template-columns: repeat(3, minmax(320px, 1fr));
+            grid-template-columns: repeat(3, minmax(280px, 1fr));
             gap: 12px;
             align-items: stretch;
           }
-          @media (max-width: 1180px) { .dash3 { grid-template-columns: repeat(2, minmax(320px, 1fr)); } }
-          @media (max-width: 820px) { .dash3 { grid-template-columns: 1fr; } }
-          .dashCard { display: flex; flex-direction: column; height: 100%; min-height: 340px; }
+          @media (max-width: 1024px) { .dash3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+          @media (max-width: 640px) { .dash3 { grid-template-columns: 1fr; } }
+          .dashCard { display: flex; flex-direction: column; height: 100%; min-height: 280px; }
           .dashCardBody { flex: 1; min-height: 0; overflow: auto; margin-top: 10px; }
         `}</style>
 
@@ -3366,6 +3371,7 @@ function AreaRow({
 
   return (
     <div
+      className="admin-areas-row"
       style={{
         display: "grid",
         gridTemplateColumns: "60px 1.2fr 1.2fr auto 1fr",

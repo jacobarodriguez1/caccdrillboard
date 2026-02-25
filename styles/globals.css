@@ -52,11 +52,139 @@
   }
 }
 
+html {
+  font-size: 16px;
+}
+
 html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
   height: 100%;
+}
+
+/* =========================
+   Responsive layout utilities
+   Breakpoints: mobile <=640px, tablet 641-1024px, desktop >=1025px
+   ========================= */
+
+/* Touch-friendly interactive elements */
+@media (max-width: 640px) {
+  button,
+  a[href],
+  input,
+  select,
+  [role="button"] {
+    min-height: 44px;
+  }
+  input,
+  select {
+    font-size: 16px !important; /* prevents iOS zoom on focus */
+  }
+}
+
+/* Responsive page padding */
+.responsive-page {
+  padding: 18px;
+}
+@media (max-width: 640px) {
+  .responsive-page {
+    padding: 12px;
+  }
+}
+
+/* Public board pad grid */
+.public-board-grid {
+  display: grid;
+  gap: 14px;
+}
+@media (max-width: 640px) {
+  .public-board-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (min-width: 641px) and (max-width: 1024px) {
+  .public-board-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1025px) {
+  .public-board-grid:not(.public-board-grid-big) {
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  }
+  .public-board-grid.public-board-grid-big {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .public-board-grid.public-board-grid-big {
+    grid-template-columns: 1fr;
+  }
+}
+@media (min-width: 641px) and (max-width: 1024px) {
+  .public-board-grid.public-board-grid-big {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Public board header */
+@media (max-width: 640px) {
+  .public-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .public-header-logo {
+    width: 80px !important;
+    height: 80px !important;
+    align-self: center;
+  }
+  .public-header input[type="text"] {
+    width: 100% !important;
+    max-width: none !important;
+  }
+  .public-header-title {
+    font-size: clamp(20px, 5vw, 40px) !important;
+  }
+}
+
+/* Kiosk entry button - safe area on mobile */
+@media (max-width: 640px) {
+  .kiosk-entry {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    justify-content: center;
+  }
+  .kiosk-entry a {
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+/* Admin sections stack on mobile */
+@media (max-width: 640px) {
+  .admin-header-inner {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+  }
+  .admin-header-actions {
+    width: 100%;
+  }
+  .admin-broadcast-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .admin-comm-layout {
+    grid-template-columns: 1fr !important;
+  }
+  .admin-areas-row {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    align-items: stretch !important;
+  }
+  .admin-areas-row > div:first-child {
+    order: -1;
+  }
 }
 
 /* IMPORTANT:
