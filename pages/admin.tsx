@@ -3,10 +3,22 @@ import Head from "next/head";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
-import type { BoardState, ScheduleEvent, ScheduleType, ScheduleScope, Pad, Team } from "@/lib/state";
+import type {
+  BoardState,
+  ScheduleEvent,
+  ScheduleType,
+  ScheduleScope,
+  Pad,
+  Team,
+} from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, buttonStyle, chipStyle } from "@/lib/ui";
 import { requireAdminRole } from "@/lib/auth";
+import {
+  PadPrimarySection,
+  PadOnDeckSection,
+  PadStandbySection,
+} from "@/components/PadLayout";
 
 const COLOR_ORANGE = "rgba(255,152,0,0.95)";
 const COLOR_YELLOW = "rgba(255,235,59,0.95)";
@@ -58,7 +70,10 @@ const flatInput: React.CSSProperties = {
 };
 
 const pillButton = (active = false): React.CSSProperties => ({
-  ...buttonStyle({ bg: active ? "rgba(255,215,64,0.18)" : "rgba(0,0,0,0.25)", disabled: false }),
+  ...buttonStyle({
+    bg: active ? "rgba(255,215,64,0.18)" : "rgba(0,0,0,0.25)",
+    disabled: false,
+  }),
   padding: "6px 10px",
   borderRadius: 999,
   fontWeight: 900,
@@ -69,7 +84,12 @@ const pillButton = (active = false): React.CSSProperties => ({
    ======================= */
 function isArrivedForNow(p: Pad): boolean {
   const nowId = p.now?.id ?? null;
-  return !!p.nowArrivedAt && !!p.nowArrivedTeamId && !!nowId && p.nowArrivedTeamId === nowId;
+  return (
+    !!p.nowArrivedAt &&
+    !!p.nowArrivedTeamId &&
+    !!nowId &&
+    p.nowArrivedTeamId === nowId
+  );
 }
 
 function isReportValid(p: Pad, nowMs: number): boolean {
@@ -82,10 +102,14 @@ function isReportValid(p: Pad, nowMs: number): boolean {
   return true;
 }
 
-function padOpsStatus(p: Pad, nowMs: number): "ON PAD" | "REPORTING" | "LATE" | "BREAK" | "IDLE" {
+function padOpsStatus(
+  p: Pad,
+  nowMs: number,
+): "ON PAD" | "REPORTING" | "LATE" | "BREAK" | "IDLE" {
   if (p.breakUntilAt && p.breakUntilAt > nowMs) return "BREAK";
   if (isArrivedForNow(p)) return "ON PAD";
-  if (isReportValid(p, nowMs) && p.reportByDeadlineAt) return p.reportByDeadlineAt - nowMs < 0 ? "LATE" : "REPORTING";
+  if (isReportValid(p, nowMs) && p.reportByDeadlineAt)
+    return p.reportByDeadlineAt - nowMs < 0 ? "LATE" : "REPORTING";
   return "IDLE";
 }
 
@@ -116,7 +140,10 @@ function parsePadIdsAny(s: string): number[] {
  * Minimal CSV parser (no deps).
  * Supports: commas, quoted fields, CRLF, header row.
  */
-function parseCsv(text: string): { headers: string[]; rows: Record<string, string>[] } {
+function parseCsv(text: string): {
+  headers: string[];
+  rows: Record<string, string>[];
+} {
   const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = s.split("\n").filter((l) => l.trim().length > 0);
   if (lines.length === 0) return { headers: [], rows: [] };
@@ -159,7 +186,8 @@ function parseCsv(text: string): { headers: string[]; rows: Record<string, strin
   for (let i = 1; i < lines.length; i++) {
     const cols = parseLine(lines[i]);
     const row: Record<string, string> = {};
-    for (let c = 0; c < headers.length; c++) row[headers[c]] = (cols[c] ?? "").trim();
+    for (let c = 0; c < headers.length; c++)
+      row[headers[c]] = (cols[c] ?? "").trim();
     rows.push(row);
   }
 
@@ -211,8 +239,12 @@ type CommSnapshot = {
 type CommBroadcastTarget = "ALL" | "PAD";
 
 function formatHhmm(ts: number) {
+  if (!Number.isFinite(ts)) return "";
   try {
-    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date(ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return "";
   }
@@ -258,7 +290,9 @@ export default function AdminPage() {
   // Areas
   const [newAreaName, setNewAreaName] = useState("");
   const [newAreaLabel, setNewAreaLabel] = useState("");
-  const [confirmDeletePadId, setConfirmDeletePadId] = useState<number | null>(null);
+  const [confirmDeletePadId, setConfirmDeletePadId] = useState<number | null>(
+    null,
+  );
 
   // ✅ Clear All
   const [confirmClearAll, setConfirmClearAll] = useState(false);
@@ -290,7 +324,9 @@ export default function AdminPage() {
      Admin comm state (pad-based channels)
      ======================= */
   const [commSnap, setCommSnap] = useState<CommSnapshot | null>(null);
-  const [commSelectedPadId, setCommSelectedPadId] = useState<number | null>(null);
+  const [commSelectedPadId, setCommSelectedPadId] = useState<number | null>(
+    null,
+  );
   const [commDraft, setCommDraft] = useState("");
   const [commUrgent, setCommUrgent] = useState(false);
   const [commBusy, setCommBusy] = useState(false);
@@ -349,12 +385,17 @@ export default function AdminPage() {
     socket!.emit!(event, payload);
   }
 
-  const setEventHeaderLabelLive = (text: string) => emit("admin:setEventHeaderLabel", { text });
+  const setEventHeaderLabelLive = (text: string) =>
+    emit("admin:setEventHeaderLabel", { text });
 
   const onChangeEventHeaderLabel = (v: string) => {
     setEventHeaderDraft(v);
-    if (headerDebounceRef.current) window.clearTimeout(headerDebounceRef.current);
-    headerDebounceRef.current = window.setTimeout(() => setEventHeaderLabelLive(v), 200);
+    if (headerDebounceRef.current)
+      window.clearTimeout(headerDebounceRef.current);
+    headerDebounceRef.current = window.setTimeout(
+      () => setEventHeaderLabelLive(v),
+      200,
+    );
   };
 
   // Header controls
@@ -367,44 +408,69 @@ export default function AdminPage() {
   };
 
   // Global message
-  const doSetMessage = () => emit("admin:setGlobalMessage", { text: msgText.trim(), minutes: msgMinutes });
+  const doSetMessage = () =>
+    emit("admin:setGlobalMessage", {
+      text: msgText.trim(),
+      minutes: msgMinutes,
+    });
   const doClearMessage = () => emit("admin:clearGlobalMessage");
 
   // Global break
-  const doStartGlobalBreakNow = () => emit("admin:startGlobalBreak", { minutes: gbMinutes, reason: gbReason.trim() || "Break" });
+  const doStartGlobalBreakNow = () =>
+    emit("admin:startGlobalBreak", {
+      minutes: gbMinutes,
+      reason: gbReason.trim() || "Break",
+    });
   const doScheduleGlobalBreak = () => {
     if (!gbStartLocal) return;
     const startAt = new Date(gbStartLocal).getTime();
-    emit("admin:scheduleGlobalBreak", { startAt, minutes: gbMinutes, reason: gbReason.trim() || "Break" });
+    emit("admin:scheduleGlobalBreak", {
+      startAt,
+      minutes: gbMinutes,
+      reason: gbReason.trim() || "Break",
+    });
   };
   const doEndGlobalBreak = () => emit("admin:endGlobalBreak");
 
   // Schedule
-  const schedule = useMemo(() => (state?.schedule ?? []).slice().sort((a, b) => a.startAt - b.startAt), [state?.schedule]);
+  const schedule = useMemo(
+    () => (state?.schedule ?? []).slice().sort((a, b) => a.startAt - b.startAt),
+    [state?.schedule],
+  );
 
   const nowGlobal = useMemo(
-    () => schedule.filter((e) => e.scope === "GLOBAL").find((e) => nowMs >= e.startAt && nowMs < e.endAt) ?? null,
-    [schedule, nowMs]
+    () =>
+      schedule
+        .filter((e) => e.scope === "GLOBAL")
+        .find((e) => nowMs >= e.startAt && nowMs < e.endAt) ?? null,
+    [schedule, nowMs],
   );
 
   const nextGlobal = useMemo(
-    () => schedule.filter((e) => e.scope === "GLOBAL" && e.startAt > nowMs).sort((a, b) => a.startAt - b.startAt)[0] ?? null,
-    [schedule, nowMs]
+    () =>
+      schedule
+        .filter((e) => e.scope === "GLOBAL" && e.startAt > nowMs)
+        .sort((a, b) => a.startAt - b.startAt)[0] ?? null,
+    [schedule, nowMs],
   );
 
   function addScheduleEvent() {
     setSchError(null);
     if (!canAct) return setSchError("Not connected (LIVE).");
     if (!schTitle.trim()) return setSchError("Title is required.");
-    if (!schStart || !schEnd) return setSchError("Start and End time are required.");
+    if (!schStart || !schEnd)
+      return setSchError("Start and End time are required.");
 
     const startAt = new Date(schStart).getTime();
     const endAt = new Date(schEnd).getTime();
-    if (!Number.isFinite(startAt) || !Number.isFinite(endAt)) return setSchError("Invalid date/time format.");
-    if (endAt <= startAt) return setSchError("End time must be after Start time.");
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt))
+      return setSchError("Invalid date/time format.");
+    if (endAt <= startAt)
+      return setSchError("End time must be after Start time.");
 
     const padIds = schScope === "PAD" ? parsePadIdsAny(schPadIds) : undefined;
-    if (schScope === "PAD" && (!padIds || padIds.length === 0)) return setSchError("Pad IDs required for PAD-scoped events (e.g., 3,4).");
+    if (schScope === "PAD" && (!padIds || padIds.length === 0))
+      return setSchError("Pad IDs required for PAD-scoped events (e.g., 3,4).");
 
     const event: Omit<ScheduleEvent, "id"> & { id?: never } = {
       title: schTitle.trim(),
@@ -419,20 +485,31 @@ export default function AdminPage() {
     emit("admin:schedule:add", { event });
   }
 
-  const updateEvent = (id: string, patch: Partial<ScheduleEvent>) => emit("admin:schedule:update", { id, patch });
+  const updateEvent = (id: string, patch: Partial<ScheduleEvent>) =>
+    emit("admin:schedule:update", { id, patch });
   const deleteEvent = (id: string) => emit("admin:schedule:delete", { id });
 
   // Pad health (admin only)
   const padHealth = useMemo(() => {
     const pads = state?.pads ?? [];
-    return pads.map((p) => ({ id: p.id, label: p.label, status: padOpsStatus(p, nowMs) }));
+    return pads.map((p) => ({
+      id: p.id,
+      label: p.label,
+      status: padOpsStatus(p, nowMs),
+    }));
   }, [state?.pads, nowMs]);
 
   // Areas
-  const areas = useMemo(() => (state?.pads ?? []).slice().sort((a, b) => a.id - b.id), [state?.pads]);
+  const areas = useMemo(
+    () => (state?.pads ?? []).slice().sort((a, b) => a.id - b.id),
+    [state?.pads],
+  );
 
   const addArea = () => {
-    emit("admin:pad:add", { name: newAreaName.trim() || undefined, label: newAreaLabel.trim() || undefined });
+    emit("admin:pad:add", {
+      name: newAreaName.trim() || undefined,
+      label: newAreaLabel.trim() || undefined,
+    });
     setNewAreaName("");
     setNewAreaLabel("");
   };
@@ -474,7 +551,12 @@ export default function AdminPage() {
     if (!teamName) return setAddError("Team Name is required.");
     if (!teamId) return setAddError("Team ID is required.");
 
-    emit("admin:team:add", { padId: addModalPadId, where: addWhere, teamName, teamId });
+    emit("admin:team:add", {
+      padId: addModalPadId,
+      where: addWhere,
+      teamName,
+      teamId,
+    });
     closeAddModal();
   };
 
@@ -523,14 +605,44 @@ export default function AdminPage() {
       return;
     }
 
-    const locationAliases = ["pad", "area", "station", "location", "ring", "lane", "classroom", "number", "padid", "areaid", "stationid"];
+    const locationAliases = [
+      "pad",
+      "area",
+      "station",
+      "location",
+      "ring",
+      "lane",
+      "classroom",
+      "number",
+      "padid",
+      "areaid",
+      "stationid",
+    ];
     const locHeader = pickFirstHeader(headers, locationAliases);
-    const teamIdHeader = pickFirstHeader(headers, ["teamId", "teamID", "id", "team"]);
-    const teamNameHeader = pickFirstHeader(headers, ["teamName", "team", "name"]);
+    const teamIdHeader = pickFirstHeader(headers, [
+      "teamId",
+      "teamID",
+      "id",
+      "team",
+    ]);
+    const teamNameHeader = pickFirstHeader(headers, [
+      "teamName",
+      "team",
+      "name",
+    ]);
 
-    if (!locHeader) return setImportError(`Missing location column. Accepted headers: pad, area, station, location, ring, lane, classroom, number.`);
-    if (!teamIdHeader) return setImportError(`Missing teamId column (accepted: teamId, teamID, id, team).`);
-    if (!teamNameHeader) return setImportError(`Missing teamName column (accepted: teamName, team, name).`);
+    if (!locHeader)
+      return setImportError(
+        `Missing location column. Accepted headers: pad, area, station, location, ring, lane, classroom, number.`,
+      );
+    if (!teamIdHeader)
+      return setImportError(
+        `Missing teamId column (accepted: teamId, teamID, id, team).`,
+      );
+    if (!teamNameHeader)
+      return setImportError(
+        `Missing teamName column (accepted: teamName, team, name).`,
+      );
 
     const errors: string[] = [];
     const cleaned: { padId: number; teamId: string; teamName: string }[] = [];
@@ -544,17 +656,33 @@ export default function AdminPage() {
       const padId = Number(rawLoc);
 
       if (!rawLoc) errors.push(`Row ${rowNum}: missing ${locHeader}`);
-      if (!Number.isFinite(padId) || padId <= 0) errors.push(`Row ${rowNum}: invalid ${locHeader} "${rawLoc}" (must be 1,2,3...)`);
+      if (!Number.isFinite(padId) || padId <= 0)
+        errors.push(
+          `Row ${rowNum}: invalid ${locHeader} "${rawLoc}" (must be 1,2,3...)`,
+        );
       if (!rawTeamId) errors.push(`Row ${rowNum}: missing ${teamIdHeader}`);
       if (!rawTeamName) errors.push(`Row ${rowNum}: missing ${teamNameHeader}`);
 
-      if (rawLoc && Number.isFinite(padId) && padId > 0 && rawTeamId && rawTeamName) {
-        cleaned.push({ padId: Math.floor(padId), teamId: rawTeamId, teamName: rawTeamName });
+      if (
+        rawLoc &&
+        Number.isFinite(padId) &&
+        padId > 0 &&
+        rawTeamId &&
+        rawTeamName
+      ) {
+        cleaned.push({
+          padId: Math.floor(padId),
+          teamId: rawTeamId,
+          teamName: rawTeamName,
+        });
       }
     });
 
     if (errors.length) {
-      setImportError(errors.slice(0, 25).join("\n") + (errors.length > 25 ? `\n...and ${errors.length - 25} more` : ""));
+      setImportError(
+        errors.slice(0, 25).join("\n") +
+          (errors.length > 25 ? `\n...and ${errors.length - 25} more` : ""),
+      );
       return;
     }
     if (cleaned.length === 0) return setImportError("No valid rows found.");
@@ -564,12 +692,19 @@ export default function AdminPage() {
 
     setTimeout(() => {
       cleaned.forEach((row) => {
-        emit("admin:team:add", { padId: row.padId, where: "END", teamId: row.teamId, teamName: row.teamName });
+        emit("admin:team:add", {
+          padId: row.padId,
+          where: "END",
+          teamId: row.teamId,
+          teamName: row.teamName,
+        });
       });
     }, 200);
 
     const padsTouched = new Set(cleaned.map((r) => r.padId));
-    setImportNote(`Imported ${cleaned.length} team(s) into Standby across ${padsTouched.size} area(s), in file order.`);
+    setImportNote(
+      `Imported ${cleaned.length} team(s) into Standby across ${padsTouched.size} area(s), in file order.`,
+    );
   };
 
   const globalBreakActive = useMemo(() => {
@@ -579,7 +714,10 @@ export default function AdminPage() {
     return !!until && nowMs < until;
   }, [state?.globalBreakStartAt, state?.globalBreakUntilAt, nowMs]);
 
-  const globalBreakRemaining = globalBreakActive && state?.globalBreakUntilAt ? (state.globalBreakUntilAt - nowMs) / 1000 : null;
+  const globalBreakRemaining =
+    globalBreakActive && state?.globalBreakUntilAt
+      ? (state.globalBreakUntilAt - nowMs) / 1000
+      : null;
 
   // ✅ Queue Manager derived
   const queuePad = useMemo(() => {
@@ -623,7 +761,11 @@ export default function AdminPage() {
     const name = qmEditName.trim();
     const id = qmEditId.trim();
     if (!name || !id) return;
-    emit("admin:queue:updateTeam", { padId, teamId: qmEditOriginalId, patch: { name, id } });
+    emit("admin:queue:updateTeam", {
+      padId,
+      teamId: qmEditOriginalId,
+      patch: { name, id },
+    });
     cancelEdit();
   };
 
@@ -636,40 +778,60 @@ export default function AdminPage() {
     setQmAddId("");
   };
 
-  const qmMoveStandby = (padId: number, from: number, to: number) => emit("admin:standby:move", { padId, from, to });
-  const qmRemoveStandby = (padId: number, teamId: string) => emit("admin:standby:remove", { padId, teamId });
-  const qmSetSlot = (padId: number, teamId: string, target: "NOW" | "ONDECK") => emit("admin:queue:setSlot", { padId, teamId, target });
-  const qmDemote = (padId: number, from: "NOW" | "ONDECK", to: "TOP" | "END") => emit("admin:queue:demote", { padId, from, to });
+  const qmMoveStandby = (padId: number, from: number, to: number) =>
+    emit("admin:standby:move", { padId, from, to });
+  const qmRemoveStandby = (padId: number, teamId: string) =>
+    emit("admin:standby:remove", { padId, teamId });
+  const qmSetSlot = (padId: number, teamId: string, target: "NOW" | "ONDECK") =>
+    emit("admin:queue:setSlot", { padId, teamId, target });
+  const qmDemote = (padId: number, from: "NOW" | "ONDECK", to: "TOP" | "END") =>
+    emit("admin:queue:demote", { padId, from, to });
   const qmSwap = (padId: number) => emit("admin:queue:swap", { padId });
 
   /* =======================
      Comm derived + actions (pad-based)
      ======================= */
-  const commChannels = useMemo(() => (commSnap?.channels ?? []).slice(), [commSnap?.channels]);
+  const commChannels = useMemo(
+    () => (commSnap?.channels ?? []).slice(),
+    [commSnap?.channels],
+  );
 
   useEffect(() => {
-    if (commSelectedPadId == null && commChannels.length > 0) setCommSelectedPadId(commChannels[0].padId);
-    if (commSelectedPadId != null && commChannels.length > 0 && !commChannels.some((c) => c.padId === commSelectedPadId)) {
+    if (commSelectedPadId == null && commChannels.length > 0)
+      setCommSelectedPadId(commChannels[0].padId);
+    if (
+      commSelectedPadId != null &&
+      commChannels.length > 0 &&
+      !commChannels.some((c) => c.padId === commSelectedPadId)
+    ) {
       setCommSelectedPadId(commChannels[0]?.padId ?? null);
     }
   }, [commChannels, commSelectedPadId]);
 
   const selectedChannel = useMemo(
     () => commChannels.find((c) => c.padId === commSelectedPadId) ?? null,
-    [commChannels, commSelectedPadId]
+    [commChannels, commSelectedPadId],
   );
 
-  const selectedChat = useMemo(() => (selectedChannel?.messages ?? []).slice(), [selectedChannel?.messages]);
+  const selectedChat = useMemo(
+    () => (selectedChannel?.messages ?? []).slice(),
+    [selectedChannel?.messages],
+  );
 
   const sendAdminChat = () => {
     setCommErr(null);
     const text = commDraft.trim();
     if (!text) return;
     if (!canAct) return setCommErr("Not connected (LIVE).");
-    if (commSelectedPadId == null) return setCommErr("Select a pad channel first.");
+    if (commSelectedPadId == null)
+      return setCommErr("Select a pad channel first.");
 
     setCommBusy(true);
-    emit("admin:comm:send", { toPadId: commSelectedPadId, text, urgent: commUrgent });
+    emit("admin:comm:send", {
+      toPadId: commSelectedPadId,
+      text,
+      urgent: commUrgent,
+    });
     setCommDraft("");
     setTimeout(() => setCommBusy(false), 250);
   };
@@ -684,8 +846,14 @@ export default function AdminPage() {
 
     if (bcTarget === "PAD") {
       const pid = Math.floor(Number(bcPadId));
-      if (!Number.isFinite(pid) || pid <= 0) return setCommErr("PAD broadcast requires a valid padId (e.g., 3).");
-      emit("admin:comm:broadcast", { text, target: "PAD", padId: pid, ttlSeconds });
+      if (!Number.isFinite(pid) || pid <= 0)
+        return setCommErr("PAD broadcast requires a valid padId (e.g., 3).");
+      emit("admin:comm:broadcast", {
+        text,
+        target: "PAD",
+        padId: pid,
+        ttlSeconds,
+      });
     } else {
       emit("admin:comm:broadcast", { text, target: "ALL", ttlSeconds });
     }
@@ -699,22 +867,30 @@ export default function AdminPage() {
         <title>Competition Matrix — Admin</title>
       </Head>
 
-      <main style={{ minHeight: "100vh", background: "var(--cacc-navy)", color: "white", padding: 18, fontFamily: "system-ui" }}>
+      <main
+        style={{
+          minHeight: "100vh",
+          background: "var(--page-bg)",
+          color: "var(--text-primary)",
+          padding: 18,
+          fontFamily: "system-ui",
+        }}
+      >
         {/* =======================
             Header
            ======================= */}
         <header
           style={{
-            borderRadius: 18,
-            background: "rgba(255,255,255,0.06)",
-            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 12,
+            background: "var(--surface-1)",
+            border: "1px solid var(--border-crisp)",
             padding: "16px 18px",
             display: "flex",
             gap: 14,
             alignItems: "center",
             justifyContent: "space-between",
             flexWrap: "wrap",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
           }}
         >
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
@@ -733,20 +909,52 @@ export default function AdminPage() {
             />
 
             <div>
-              <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: 1.2, opacity: 0.92, lineHeight: 1.1 }}>
+              <div
+                style={{
+                  fontSize: 22,
+                  fontWeight: 900,
+                  letterSpacing: 1.2,
+                  opacity: 0.92,
+                  lineHeight: 1.1,
+                }}
+              >
                 CALIFORNIA CADET CORPS
               </div>
 
-              <div style={{ display: "flex", gap: 12, alignItems: "baseline", flexWrap: "wrap", marginTop: 6 }}>
-                <div style={{ fontSize: 40, fontWeight: 1000, lineHeight: 1.05 }}>ADMIN CONSOLE</div>
-                <div style={{ fontSize: 12, opacity: 0.8 }}>
-                  {state?.updatedAt ? `Last update: ${fmtTime(state.updatedAt)}` : "Waiting for state…"}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "baseline",
+                  flexWrap: "wrap",
+                  marginTop: 6,
+                }}
+              >
+                <div
+                  style={{ fontSize: 40, fontWeight: 1000, lineHeight: 1.05 }}
+                >
+                  ADMIN CONSOLE
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                  {state?.updatedAt
+                    ? `Last update: ${fmtTime(state.updatedAt)}`
+                    : "Waiting for state…"}
                 </div>
               </div>
 
               {/* Event Header Label editor */}
-              <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>EVENT HEADER LABEL</span>
+              <div
+                style={{
+                  marginTop: 12,
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>
+                  EVENT HEADER LABEL
+                </span>
 
                 <input
                   value={eventHeaderDraft}
@@ -794,20 +1002,48 @@ export default function AdminPage() {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={chipStyle(connected ? "var(--success)" : "var(--warning)", connected ? "white" : "#111")}>
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <span
+              style={chipStyle(
+                connected ? "var(--success)" : "var(--warning)",
+                connected ? "white" : "#111",
+              )}
+            >
               {connected ? "LIVE" : "CONNECTING"}
             </span>
 
-            <Link href="/judge" style={{ ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }), textDecoration: "none" }}>
+            <Link
+              href="/judge"
+              style={{
+                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
+                textDecoration: "none",
+              }}
+            >
               Judge
             </Link>
 
-            <Link href="/public" style={{ ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }), textDecoration: "none" }}>
+            <Link
+              href="/public"
+              style={{
+                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
+                textDecoration: "none",
+              }}
+            >
               Public
             </Link>
 
-            <button onClick={doReloadRoster} disabled={!canAct} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>
+            <button
+              onClick={doReloadRoster}
+              disabled={!canAct}
+              style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}
+            >
               Reload Roster
             </button>
           </div>
@@ -825,19 +1061,47 @@ export default function AdminPage() {
             border: "1px solid rgba(255,255,255,0.10)",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={{ fontWeight: 1000 }}>🗨️ Ops Chat / Broadcast (Pad Channels)</div>
-            <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>Channels: {commChannels.length}</span>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <div style={{ fontWeight: 1000 }}>
+              🗨️ Ops Chat / Broadcast (Pad Channels)
+            </div>
+            <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>
+              Channels: {commChannels.length}
+            </span>
           </div>
 
           {commErr ? (
-            <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: `1px solid ${COLOR_RED}`, background: "rgba(198,40,40,0.16)" }}>
+            <div
+              style={{
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 12,
+                border: `1px solid ${COLOR_RED}`,
+                background: "rgba(198,40,40,0.16)",
+              }}
+            >
               <b>Error:</b> {commErr}
             </div>
           ) : null}
 
           {/* Broadcast row */}
-          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 120px 110px 110px 140px", gap: 10, alignItems: "center" }}>
+          <div
+            style={{
+              marginTop: 10,
+              display: "grid",
+              gridTemplateColumns: "1fr 120px 110px 110px 140px",
+              gap: 10,
+              alignItems: "center",
+            }}
+          >
             <input
               value={bcText}
               onChange={(e) => setBcText(e.target.value)}
@@ -845,7 +1109,12 @@ export default function AdminPage() {
               style={flatInput}
               disabled={!canAct}
             />
-            <select value={bcTarget} onChange={(e) => setBcTarget(e.target.value as any)} style={flatInput as any} disabled={!canAct}>
+            <select
+              value={bcTarget}
+              onChange={(e) => setBcTarget(e.target.value as any)}
+              style={flatInput as any}
+              disabled={!canAct}
+            >
               <option value="ALL">ALL</option>
               <option value="PAD">PAD</option>
             </select>
@@ -868,19 +1137,43 @@ export default function AdminPage() {
             <button
               disabled={!canAct || !bcText.trim()}
               onClick={sendBroadcast}
-              style={buttonStyle({ bg: COLOR_ORANGE, fg: "#111", disabled: !canAct || !bcText.trim() })}
+              style={buttonStyle({
+                bg: COLOR_ORANGE,
+                fg: "#111",
+                disabled: !canAct || !bcText.trim(),
+              })}
             >
               Broadcast
             </button>
           </div>
 
           {/* Channel list + chat */}
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "340px 1fr", gap: 12 }}>
-            <div style={{ borderRadius: 14, padding: 10, background: "rgba(0,0,0,0.18)", border: "1px solid rgba(255,255,255,0.10)", maxHeight: 320, overflow: "auto" }}>
+          <div
+            style={{
+              marginTop: 12,
+              display: "grid",
+              gridTemplateColumns: "340px 1fr",
+              gap: 12,
+            }}
+          >
+            <div
+              style={{
+                borderRadius: 14,
+                padding: 10,
+                background: "rgba(0,0,0,0.18)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                maxHeight: 320,
+                overflow: "auto",
+              }}
+            >
               {commChannels.length === 0 ? (
-                <div style={{ opacity: 0.75 }}>No pad channels yet. Load roster or add pads.</div>
+                <div style={{ opacity: 0.75 }}>
+                  No pad channels yet. Load roster or add pads.
+                </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                >
                   {commChannels.map((c) => {
                     const active = c.padId === commSelectedPadId;
 
@@ -892,20 +1185,42 @@ export default function AdminPage() {
                           textAlign: "left",
                           padding: "10px 12px",
                           borderRadius: 14,
-                          border: active ? "2px solid rgba(255,255,255,0.35)" : "1px solid rgba(255,255,255,0.12)",
-                          background: active ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.18)",
+                          border: active
+                            ? "2px solid rgba(255,255,255,0.35)"
+                            : "1px solid rgba(255,255,255,0.12)",
+                          background: active
+                            ? "rgba(0,0,0,0.30)"
+                            : "rgba(0,0,0,0.18)",
                           color: "white",
                           cursor: "pointer",
                         }}
                         title={c.name}
                       >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            alignItems: "baseline",
+                          }}
+                        >
                           <div style={{ fontWeight: 950 }}>{c.name}</div>
-                          <span style={chipStyle(c.online ? "rgba(46,125,50,0.85)" : "rgba(0,0,0,0.25)", "white")}>
+                          <span
+                            style={chipStyle(
+                              c.online
+                                ? "rgba(46,125,50,0.85)"
+                                : "rgba(0,0,0,0.25)",
+                              "white",
+                            )}
+                          >
                             {c.online ? "online" : "offline"}
                           </span>
                         </div>
-                        <div style={{ marginTop: 4, opacity: 0.7, fontSize: 12 }}>{c.messages.length} messages</div>
+                        <div
+                          style={{ marginTop: 4, opacity: 0.7, fontSize: 12 }}
+                        >
+                          {c.messages.length} messages
+                        </div>
                       </button>
                     );
                   })}
@@ -913,28 +1228,87 @@ export default function AdminPage() {
               )}
             </div>
 
-            <div style={{ borderRadius: 14, padding: 10, background: "rgba(0,0,0,0.18)", border: "1px solid rgba(255,255,255,0.10)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+            <div
+              style={{
+                borderRadius: 14,
+                padding: 10,
+                background: "rgba(0,0,0,0.18)",
+                border: "1px solid rgba(255,255,255,0.10)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  alignItems: "baseline",
+                  flexWrap: "wrap",
+                }}
+              >
                 <div style={{ fontWeight: 950 }}>
-                  {selectedChannel ? `${selectedChannel.name} • ${selectedChannel.online ? "online" : "offline"}` : "Select a pad channel"}
+                  {selectedChannel
+                    ? `${selectedChannel.name} • ${selectedChannel.online ? "online" : "offline"}`
+                    : "Select a pad channel"}
                 </div>
               </div>
 
-              <div style={{ marginTop: 10, height: 220, overflow: "auto", padding: 10, borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.25)" }}>
+              <div
+                style={{
+                  marginTop: 10,
+                  height: 220,
+                  overflow: "auto",
+                  padding: 10,
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(0,0,0,0.25)",
+                }}
+              >
                 {selectedChat.length === 0 ? (
-                  <div style={{ opacity: 0.7, fontSize: 13 }}>No messages yet.</div>
+                  <div style={{ opacity: 0.7, fontSize: 13 }}>
+                    No messages yet.
+                  </div>
                 ) : (
                   selectedChat.slice(-140).map((m) => (
-                    <div key={m.id} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
-                      <div style={{ width: 90, opacity: 0.7, fontSize: 12, paddingTop: 2 }}>
+                    <div
+                      key={m.id}
+                      style={{ marginBottom: 8, display: "flex", gap: 8 }}
+                    >
+                      <div
+                        style={{
+                          width: 90,
+                          opacity: 0.7,
+                          fontSize: 12,
+                          paddingTop: 2,
+                        }}
+                      >
                         {m.from} • {formatHhmm(m.ts)}
                         {m.urgent && (
-                          <div style={{ fontSize: 10, fontWeight: 900, color: m.ackedAt ? "rgba(46,125,50,0.9)" : "var(--danger)" }}>
+                          <div
+                            style={{
+                              fontSize: 10,
+                              fontWeight: 900,
+                              color: m.ackedAt
+                                ? "rgba(46,125,50,0.9)"
+                                : "var(--danger)",
+                            }}
+                          >
                             {m.ackedAt ? "Acknowledged" : "Urgent"}
                           </div>
                         )}
                       </div>
-                      <div style={{ flex: 1, borderRadius: 10, padding: "8px 10px", border: "1px solid rgba(255,255,255,0.10)", background: m.from === "ADMIN" ? "rgba(255,152,0,0.10)" : "rgba(0,150,255,0.10)", whiteSpace: "pre-wrap" }}>
+                      <div
+                        style={{
+                          flex: 1,
+                          borderRadius: 10,
+                          padding: "8px 10px",
+                          border: "1px solid rgba(255,255,255,0.10)",
+                          background:
+                            m.from === "ADMIN"
+                              ? "rgba(255,152,0,0.10)"
+                              : "rgba(0,150,255,0.10)",
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
                         {m.text}
                       </div>
                     </div>
@@ -942,9 +1316,29 @@ export default function AdminPage() {
                 )}
               </div>
 
-              <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
-                  <input type="checkbox" checked={commUrgent} onChange={(e) => setCommUrgent(e.target.checked)} />
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    cursor: "pointer",
+                    fontSize: 13,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={commUrgent}
+                    onChange={(e) => setCommUrgent(e.target.checked)}
+                  />
                   Urgent
                 </label>
                 <input
@@ -962,11 +1356,26 @@ export default function AdminPage() {
                 />
                 <button
                   onClick={sendAdminChat}
-                  disabled={!canAct || commBusy || !commDraft.trim() || commSelectedPadId == null}
+                  disabled={
+                    !canAct ||
+                    commBusy ||
+                    !commDraft.trim() ||
+                    commSelectedPadId == null
+                  }
                   style={buttonStyle({
-                    bg: !canAct || commBusy || !commDraft.trim() || commSelectedPadId == null ? "rgba(0,0,0,0.25)" : "var(--cacc-gold)",
+                    bg:
+                      !canAct ||
+                      commBusy ||
+                      !commDraft.trim() ||
+                      commSelectedPadId == null
+                        ? "rgba(0,0,0,0.25)"
+                        : "var(--cacc-gold)",
                     fg: "#111",
-                    disabled: !canAct || commBusy || !commDraft.trim() || commSelectedPadId == null,
+                    disabled:
+                      !canAct ||
+                      commBusy ||
+                      !commDraft.trim() ||
+                      commSelectedPadId == null,
                   })}
                 >
                   Send
@@ -979,25 +1388,69 @@ export default function AdminPage() {
         {/* =======================
             Schedule bulletin
            ======================= */}
-        <div style={{ marginTop: 12, borderRadius: 16, padding: 12, background: "rgba(0,0,0,0.22)", border: "1px solid rgba(255,255,255,0.10)" }}>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={chipStyle("rgba(255,255,255,0.16)", "white")}>SCHEDULE</span>
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 16,
+            padding: 12,
+            background: "rgba(0,0,0,0.22)",
+            border: "1px solid rgba(255,255,255,0.10)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <span style={chipStyle("rgba(255,255,255,0.16)", "white")}>
+              SCHEDULE
+            </span>
             <div style={{ fontWeight: 900 }}>
-              NOW: {nowGlobal ? `${nowGlobal.title} (${fmtTime(nowGlobal.startAt)}–${fmtTime(nowGlobal.endAt)})` : "—"}
+              NOW:{" "}
+              {nowGlobal
+                ? `${nowGlobal.title} (${fmtTime(nowGlobal.startAt)}–${fmtTime(nowGlobal.endAt)})`
+                : "—"}
             </div>
             <div style={{ opacity: 0.85 }}>
-              NEXT: {nextGlobal ? `${nextGlobal.title} (${fmtTime(nextGlobal.startAt)}–${fmtTime(nextGlobal.endAt)})` : "—"}
+              NEXT:{" "}
+              {nextGlobal
+                ? `${nextGlobal.title} (${fmtTime(nextGlobal.startAt)}–${fmtTime(nextGlobal.endAt)})`
+                : "—"}
             </div>
           </div>
-          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>Schedule is informational only (does not pause areas).</div>
+          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+            Schedule is informational only (does not pause areas).
+          </div>
         </div>
 
         {/* =======================
             Pad health
            ======================= */}
-        <div style={{ marginTop: 12, borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}>
-          <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.85, letterSpacing: 1.1 }}>AREA HEALTH</div>
-          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 16,
+            padding: 12,
+            background: "rgba(255,255,255,0.05)",
+            border: "1px solid rgba(255,255,255,0.10)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 900,
+              opacity: 0.85,
+              letterSpacing: 1.1,
+            }}
+          >
+            AREA HEALTH
+          </div>
+          <div
+            style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}
+          >
             {padHealth.map((p) => {
               const { bg, fg } = statusPillColors(p.status);
               return (
@@ -1028,84 +1481,355 @@ export default function AdminPage() {
 
         <div className="dash3">
           {/* GLOBAL MESSAGE */}
-          <div className="dashCard" style={{ borderRadius: 16, padding: 12, background: "rgba(144,202,249,0.10)", border: "1px solid rgba(144,202,249,0.35)", boxShadow: "0 10px 26px rgba(0,0,0,0.18)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            className="dashCard"
+            style={{
+              borderRadius: 16,
+              padding: 12,
+              background: "rgba(144,202,249,0.10)",
+              border: "1px solid rgba(144,202,249,0.35)",
+              boxShadow: "0 10px 26px rgba(0,0,0,0.18)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 10,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
               <div style={{ fontWeight: 1000 }}>📢 GLOBAL MESSAGE</div>
-              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>Broadcast</span>
+              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>
+                Broadcast
+              </span>
             </div>
 
             <div className="dashCardBody">
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 96px", gap: 10, alignItems: "center" }}>
-                <input value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Message… (e.g., ROTATE AT 0500)" style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
-                <input type="number" min={1} value={msgMinutes} onChange={(e) => setMsgMinutes(Number(e.target.value || 30))} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none", width: "100%" }} title="Minutes" />
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 96px",
+                  gap: 10,
+                  alignItems: "center",
+                }}
+              >
+                <input
+                  value={msgText}
+                  onChange={(e) => setMsgText(e.target.value)}
+                  placeholder="Message… (e.g., ROTATE AT 0500)"
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  value={msgMinutes}
+                  onChange={(e) => setMsgMinutes(Number(e.target.value || 30))}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                    width: "100%",
+                  }}
+                  title="Minutes"
+                />
               </div>
 
               {state?.globalMessage ? (
-                <div style={{ marginTop: 10, opacity: 0.9, fontSize: 13, lineHeight: 1.35 }}>
-                  <div><b>Active:</b> {state.globalMessage}</div>
-                  <div style={{ opacity: 0.85 }}>{state.globalMessageUntilAt ? `Ends ${fmtTime(state.globalMessageUntilAt)}` : "No expiry"}</div>
+                <div
+                  style={{
+                    marginTop: 10,
+                    opacity: 0.9,
+                    fontSize: 13,
+                    lineHeight: 1.35,
+                  }}
+                >
+                  <div>
+                    <b>Active:</b> {state.globalMessage}
+                  </div>
+                  <div style={{ opacity: 0.85 }}>
+                    {state.globalMessageUntilAt
+                      ? `Ends ${fmtTime(state.globalMessageUntilAt)}`
+                      : "No expiry"}
+                  </div>
                 </div>
               ) : (
-                <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>No active global message.</div>
+                <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
+                  No active global message.
+                </div>
               )}
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-              <button disabled={!canAct} onClick={doSetMessage} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>Set</button>
-              <button disabled={!canAct} onClick={doClearMessage} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>Clear</button>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+                marginTop: 10,
+              }}
+            >
+              <button
+                disabled={!canAct}
+                onClick={doSetMessage}
+                style={buttonStyle({
+                  bg: "rgba(0,0,0,0.25)",
+                  disabled: !canAct,
+                })}
+              >
+                Set
+              </button>
+              <button
+                disabled={!canAct}
+                onClick={doClearMessage}
+                style={buttonStyle({
+                  bg: "rgba(0,0,0,0.25)",
+                  disabled: !canAct,
+                })}
+              >
+                Clear
+              </button>
             </div>
           </div>
 
           {/* GLOBAL BREAK */}
-          <div className="dashCard" style={{ borderRadius: 16, padding: 12, background: "rgba(255,152,0,0.10)", border: "1px solid rgba(255,152,0,0.35)", boxShadow: "0 10px 26px rgba(0,0,0,0.18)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            className="dashCard"
+            style={{
+              borderRadius: 16,
+              padding: 12,
+              background: "rgba(255,152,0,0.10)",
+              border: "1px solid rgba(255,152,0,0.35)",
+              boxShadow: "0 10px 26px rgba(0,0,0,0.18)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 10,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
               <div style={{ fontWeight: 1000 }}>🟠 GLOBAL BREAK</div>
-              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>Pauses all</span>
+              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>
+                Pauses all
+              </span>
             </div>
 
             <div className="dashCardBody">
               {globalBreakActive ? (
-                <div style={{ fontWeight: 950, fontSize: 13, lineHeight: 1.35 }}>
-                  <div><b>ACTIVE:</b> {(state?.globalBreakReason ?? "Break")}</div>
-                  <div style={{ opacity: 0.85 }}>Resumes in {Math.max(0, Math.floor(globalBreakRemaining ?? 0))}s (at {fmtTime(state!.globalBreakUntilAt!)})</div>
+                <div
+                  style={{ fontWeight: 950, fontSize: 13, lineHeight: 1.35 }}
+                >
+                  <div>
+                    <b>ACTIVE:</b> {state?.globalBreakReason ?? "Break"}
+                  </div>
+                  <div style={{ opacity: 0.85 }}>
+                    Resumes in{" "}
+                    {Math.max(0, Math.floor(globalBreakRemaining ?? 0))}s (at{" "}
+                    {fmtTime(state!.globalBreakUntilAt!)})
+                  </div>
                 </div>
-              ) : state?.globalBreakStartAt && state?.globalBreakStartAt > nowMs ? (
-                <div style={{ fontWeight: 950, fontSize: 13, lineHeight: 1.35 }}>
-                  <div><b>SCHEDULED:</b> {(state?.globalBreakReason ?? "Break")}</div>
-                  <div style={{ opacity: 0.85 }}>Starts {fmtTime(state.globalBreakStartAt)} • Ends {state.globalBreakUntilAt ? fmtTime(state.globalBreakUntilAt) : "—"}</div>
+              ) : state?.globalBreakStartAt &&
+                state?.globalBreakStartAt > nowMs ? (
+                <div
+                  style={{ fontWeight: 950, fontSize: 13, lineHeight: 1.35 }}
+                >
+                  <div>
+                    <b>SCHEDULED:</b> {state?.globalBreakReason ?? "Break"}
+                  </div>
+                  <div style={{ opacity: 0.85 }}>
+                    Starts {fmtTime(state.globalBreakStartAt)} • Ends{" "}
+                    {state.globalBreakUntilAt
+                      ? fmtTime(state.globalBreakUntilAt)
+                      : "—"}
+                  </div>
                 </div>
               ) : (
-                <div style={{ opacity: 0.75, fontSize: 13 }}>No active global break.</div>
+                <div style={{ opacity: 0.75, fontSize: 13 }}>
+                  No active global break.
+                </div>
               )}
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 96px", gap: 10, alignItems: "center" }}>
-                <input value={gbReason} onChange={(e) => setGbReason(e.target.value)} placeholder="Reason (e.g., Lunch)" style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
-                <input type="number" min={1} value={gbMinutes} onChange={(e) => setGbMinutes(Number(e.target.value || 60))} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none", width: "100%" }} title="Minutes" />
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gridTemplateColumns: "1fr 96px",
+                  gap: 10,
+                  alignItems: "center",
+                }}
+              >
+                <input
+                  value={gbReason}
+                  onChange={(e) => setGbReason(e.target.value)}
+                  placeholder="Reason (e.g., Lunch)"
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  value={gbMinutes}
+                  onChange={(e) => setGbMinutes(Number(e.target.value || 60))}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                    width: "100%",
+                  }}
+                  title="Minutes"
+                />
               </div>
 
-              <button disabled={!canAct} onClick={doStartGlobalBreakNow} style={{ ...buttonStyle({ bg: COLOR_ORANGE, fg: "#111", disabled: !canAct }), width: "100%", marginTop: 10 }}>Start Now</button>
+              <button
+                disabled={!canAct}
+                onClick={doStartGlobalBreakNow}
+                style={{
+                  ...buttonStyle({
+                    bg: COLOR_ORANGE,
+                    fg: "#111",
+                    disabled: !canAct,
+                  }),
+                  width: "100%",
+                  marginTop: 10,
+                }}
+              >
+                Start Now
+              </button>
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "center" }}>
-                <input type="datetime-local" value={gbStartLocal} onChange={(e) => setGbStartLocal(e.target.value)} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none", width: "100%" }} />
-                <button disabled={!canAct || !gbStartLocal} onClick={doScheduleGlobalBreak} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct || !gbStartLocal })}>Schedule</button>
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 10,
+                  alignItems: "center",
+                }}
+              >
+                <input
+                  type="datetime-local"
+                  value={gbStartLocal}
+                  onChange={(e) => setGbStartLocal(e.target.value)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                    width: "100%",
+                  }}
+                />
+                <button
+                  disabled={!canAct || !gbStartLocal}
+                  onClick={doScheduleGlobalBreak}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: !canAct || !gbStartLocal,
+                  })}
+                >
+                  Schedule
+                </button>
               </div>
             </div>
 
-            <button disabled={!canAct} onClick={doEndGlobalBreak} style={{ ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct }), width: "100%", marginTop: 10 }}>End</button>
+            <button
+              disabled={!canAct}
+              onClick={doEndGlobalBreak}
+              style={{
+                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct }),
+                width: "100%",
+                marginTop: 10,
+              }}
+            >
+              End
+            </button>
           </div>
 
           {/* SCHEDULE (Manual Entry) */}
-          <div className="dashCard" style={{ borderRadius: 16, padding: 12, background: "rgba(0,0,0,0.20)", border: "1px solid rgba(255,255,255,0.10)", boxShadow: "0 10px 26px rgba(0,0,0,0.18)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            className="dashCard"
+            style={{
+              borderRadius: 16,
+              padding: 12,
+              background: "rgba(0,0,0,0.20)",
+              border: "1px solid rgba(255,255,255,0.10)",
+              boxShadow: "0 10px 26px rgba(0,0,0,0.18)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 10,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
               <div style={{ fontWeight: 1000 }}>🗓️ SCHEDULE</div>
-              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>Manual entry</span>
+              <span style={chipStyle("rgba(0,0,0,0.22)", "white")}>
+                Manual entry
+              </span>
             </div>
 
             <div className="dashCardBody">
-              <input value={schTitle} onChange={(e) => setSchTitle(e.target.value)} placeholder="Title (required)" style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none", width: "100%" }} />
+              <input
+                value={schTitle}
+                onChange={(e) => setSchTitle(e.target.value)}
+                placeholder="Title (required)"
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  background: "rgba(0,0,0,0.25)",
+                  color: "white",
+                  outline: "none",
+                  width: "100%",
+                }}
+              />
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <select value={schType} onChange={(e) => setSchType(e.target.value as any)} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }}>
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 10,
+                }}
+              >
+                <select
+                  value={schType}
+                  onChange={(e) => setSchType(e.target.value as any)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                >
                   <option value="COMPETE">COMPETE</option>
                   <option value="BREAK">BREAK</option>
                   <option value="LUNCH">LUNCH</option>
@@ -1113,55 +1837,215 @@ export default function AdminPage() {
                   <option value="OTHER">OTHER</option>
                 </select>
 
-                <select value={schScope} onChange={(e) => setSchScope(e.target.value as any)} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }}>
+                <select
+                  value={schScope}
+                  onChange={(e) => setSchScope(e.target.value as any)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                >
                   <option value="GLOBAL">GLOBAL</option>
                   <option value="PAD">AREA(S)</option>
                 </select>
               </div>
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <input type="datetime-local" value={schStart} onChange={(e) => setSchStart(e.target.value)} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
-                <input type="datetime-local" value={schEnd} onChange={(e) => setSchEnd(e.target.value)} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 10,
+                }}
+              >
+                <input
+                  type="datetime-local"
+                  value={schStart}
+                  onChange={(e) => setSchStart(e.target.value)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                />
+                <input
+                  type="datetime-local"
+                  value={schEnd}
+                  onChange={(e) => setSchEnd(e.target.value)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none",
+                  }}
+                />
               </div>
 
               {schScope === "PAD" ? (
-                <input value={schPadIds} onChange={(e) => setSchPadIds(e.target.value)} placeholder="Area IDs (e.g., 3,4)" style={{ marginTop: 10, ...flatInput }} />
+                <input
+                  value={schPadIds}
+                  onChange={(e) => setSchPadIds(e.target.value)}
+                  placeholder="Area IDs (e.g., 3,4)"
+                  style={{ marginTop: 10, ...flatInput }}
+                />
               ) : null}
 
-              <input value={schNotes} onChange={(e) => setSchNotes(e.target.value)} placeholder="Notes (optional)" style={{ marginTop: 10, ...flatInput }} />
+              <input
+                value={schNotes}
+                onChange={(e) => setSchNotes(e.target.value)}
+                placeholder="Notes (optional)"
+                style={{ marginTop: 10, ...flatInput }}
+              />
 
               {schError ? (
-                <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: `1px solid ${COLOR_RED}`, background: "rgba(198,40,40,0.16)" }}>
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 10,
+                    borderRadius: 12,
+                    border: `1px solid ${COLOR_RED}`,
+                    background: "rgba(198,40,40,0.16)",
+                  }}
+                >
                   <b>Error:</b> {schError}
                 </div>
               ) : null}
 
-              <div style={{ marginTop: 10, borderRadius: 12, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)", padding: 10, maxHeight: 180, overflow: "auto" }}>
+              <div
+                style={{
+                  marginTop: 10,
+                  borderRadius: 12,
+                  background: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  padding: 10,
+                  maxHeight: 180,
+                  overflow: "auto",
+                }}
+              >
                 {schedule.length === 0 ? (
                   <div style={{ opacity: 0.75 }}>No schedule blocks yet.</div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 10,
+                    }}
+                  >
                     {schedule.map((e) => (
-                      <div key={e.id} style={{ borderRadius: 12, padding: 10, background: "rgba(0,0,0,0.18)", border: "1px solid rgba(255,255,255,0.10)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                      <div
+                        key={e.id}
+                        style={{
+                          borderRadius: 12,
+                          padding: 10,
+                          background: "rgba(0,0,0,0.18)",
+                          border: "1px solid rgba(255,255,255,0.10)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            alignItems: "flex-start",
+                          }}
+                        >
                           <div style={{ minWidth: 0 }}>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                              <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>{e.type}</span>
-                              <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>{e.scope === "PAD" ? "AREA" : e.scope}</span>
-                              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{e.title}</div>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                flexWrap: "wrap",
+                                alignItems: "center",
+                              }}
+                            >
+                              <span
+                                style={chipStyle("rgba(0,0,0,0.25)", "white")}
+                              >
+                                {e.type}
+                              </span>
+                              <span
+                                style={chipStyle("rgba(0,0,0,0.25)", "white")}
+                              >
+                                {e.scope === "PAD" ? "AREA" : e.scope}
+                              </span>
+                              <div
+                                style={{
+                                  fontWeight: 950,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  maxWidth: 220,
+                                }}
+                              >
+                                {e.title}
+                              </div>
                             </div>
-                            <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>
+                            <div
+                              style={{
+                                marginTop: 6,
+                                opacity: 0.85,
+                                fontSize: 12,
+                              }}
+                            >
                               {fmtTime(e.startAt)}–{fmtTime(e.endAt)}
-                              {e.scope === "PAD" && e.padIds?.length ? ` • Areas: ${e.padIds.join(",")}` : ""}
+                              {e.scope === "PAD" && e.padIds?.length
+                                ? ` • Areas: ${e.padIds.join(",")}`
+                                : ""}
                             </div>
-                            {e.notes ? <div style={{ marginTop: 6, opacity: 0.85, fontSize: 12 }}>Notes: {e.notes}</div> : null}
+                            {e.notes ? (
+                              <div
+                                style={{
+                                  marginTop: 6,
+                                  opacity: 0.85,
+                                  fontSize: 12,
+                                }}
+                              >
+                                Notes: {e.notes}
+                              </div>
+                            ) : null}
                           </div>
 
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <button disabled={!canAct} onClick={() => updateEvent(e.id, { title: prompt("What's the new title?", e.title) ?? e.title })} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 8,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              disabled={!canAct}
+                              onClick={() =>
+                                updateEvent(e.id, {
+                                  title:
+                                    prompt("What's the new title?", e.title) ??
+                                    e.title,
+                                })
+                              }
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.25)",
+                                disabled: !canAct,
+                              })}
+                            >
                               Rename
                             </button>
-                            <button disabled={!canAct} onClick={() => deleteEvent(e.id)} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>
+                            <button
+                              disabled={!canAct}
+                              onClick={() => deleteEvent(e.id)}
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.25)",
+                                disabled: !canAct,
+                              })}
+                            >
                               Delete
                             </button>
                           </div>
@@ -1172,10 +2056,24 @@ export default function AdminPage() {
                 )}
               </div>
 
-              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>Schedule is informational only (does not pause areas).</div>
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                Schedule is informational only (does not pause areas).
+              </div>
             </div>
 
-            <button disabled={!canAct} onClick={addScheduleEvent} style={{ ...buttonStyle({ bg: "var(--cacc-gold)", fg: "#111", disabled: !canAct }), width: "100%", marginTop: 10 }}>
+            <button
+              disabled={!canAct}
+              onClick={addScheduleEvent}
+              style={{
+                ...buttonStyle({
+                  bg: "var(--cacc-gold)",
+                  fg: "#111",
+                  disabled: !canAct,
+                }),
+                width: "100%",
+                marginTop: 10,
+              }}
+            >
               Add Block
             </button>
           </div>
@@ -1184,12 +2082,35 @@ export default function AdminPage() {
         {/* =======================
             AREAS (this section matches your screenshot UI)
            ======================= */}
-        <div style={{ marginTop: 14, borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div
+          style={{
+            marginTop: 14,
+            borderRadius: 16,
+            padding: 12,
+            background: "rgba(255,255,255,0.05)",
+            border: "1px solid rgba(255,255,255,0.10)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
             <div style={{ fontWeight: 1000 }}>AREAS</div>
 
             {/* Header actions: side-by-side, smaller */}
-            <div style={{ display: "flex", gap: 10, flexWrap: "nowrap", alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+                flexWrap: "nowrap",
+                alignItems: "center",
+              }}
+            >
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1228,7 +2149,11 @@ export default function AdminPage() {
                 onClick={() => setConfirmClearAll(true)}
                 title="Hard reset: clears NOW/ONDECK/STANDBY across all areas"
                 style={{
-                  ...buttonStyle({ bg: "rgba(198,40,40,0.18)", fg: "#ffd2d2", disabled: !canAct }),
+                  ...buttonStyle({
+                    bg: "rgba(198,40,40,0.18)",
+                    fg: "#ffd2d2",
+                    disabled: !canAct,
+                  }),
                   display: "inline-flex",
                   width: "auto",
                   minWidth: "unset",
@@ -1247,32 +2172,97 @@ export default function AdminPage() {
           </div>
 
           <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
-            Admin controls areas. Creating/deleting areas live-updates Judge + Public. Click queue controls to open Queue Manager.
+            Admin controls areas. Creating/deleting areas live-updates Judge +
+            Public. Click queue controls to open Queue Manager.
           </div>
 
           {importError ? (
-            <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: `1px solid ${COLOR_RED}`, background: "rgba(198,40,40,0.16)", whiteSpace: "pre-wrap" }}>
+            <div
+              style={{
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 12,
+                border: `1px solid ${COLOR_RED}`,
+                background: "rgba(198,40,40,0.16)",
+                whiteSpace: "pre-wrap",
+              }}
+            >
               <b>Import error:</b> {importError}
             </div>
           ) : null}
 
           {importNote ? (
-            <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.18)" }}>
+            <div
+              style={{
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(0,0,0,0.18)",
+              }}
+            >
               ✅ {importNote}
             </div>
           ) : null}
 
           {/* add area row */}
-          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 160px", gap: 10, alignItems: "center" }}>
-            <input value={newAreaName} onChange={(e) => setNewAreaName(e.target.value)} placeholder="Name (optional) e.g., Classroom A" style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
-            <input value={newAreaLabel} onChange={(e) => setNewAreaLabel(e.target.value)} placeholder="Label (optional) e.g., Map & Compass" style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.25)", color: "white", outline: "none" }} />
-            <button disabled={!canAct} onClick={addArea} style={buttonStyle({ bg: "var(--cacc-gold)", fg: "#111", disabled: !canAct })}>
+          <div
+            style={{
+              marginTop: 10,
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr 160px",
+              gap: 10,
+              alignItems: "center",
+            }}
+          >
+            <input
+              value={newAreaName}
+              onChange={(e) => setNewAreaName(e.target.value)}
+              placeholder="Name (optional) e.g., Classroom A"
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(0,0,0,0.25)",
+                color: "white",
+                outline: "none",
+              }}
+            />
+            <input
+              value={newAreaLabel}
+              onChange={(e) => setNewAreaLabel(e.target.value)}
+              placeholder="Label (optional) e.g., Map & Compass"
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(0,0,0,0.25)",
+                color: "white",
+                outline: "none",
+              }}
+            />
+            <button
+              disabled={!canAct}
+              onClick={addArea}
+              style={buttonStyle({
+                bg: "var(--cacc-gold)",
+                fg: "#111",
+                disabled: !canAct,
+              })}
+            >
               Add Area
             </button>
           </div>
 
           {/* areas list */}
-          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
             {areas.length === 0 ? (
               <div style={{ opacity: 0.75 }}>No areas created.</div>
             ) : (
@@ -1297,16 +2287,48 @@ export default function AdminPage() {
         {confirmClearAll && (
           <div onClick={() => setConfirmClearAll(false)} style={modalBackdrop}>
             <div onClick={(e) => e.stopPropagation()} style={modalCard}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>Clear ALL Areas?</div>
-              <div style={{ marginTop: 10, opacity: 0.85, fontSize: 13, lineHeight: 1.35 }}>
-                This will remove <b>ALL participants</b> from NOW, ON DECK, and STANDBY across every area. This cannot be undone.
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                Clear ALL Areas?
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  opacity: 0.85,
+                  fontSize: 13,
+                  lineHeight: 1.35,
+                }}
+              >
+                This will remove <b>ALL participants</b> from NOW, ON DECK, and
+                STANDBY across every area. This cannot be undone.
               </div>
 
-              <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                <button onClick={() => setConfirmClearAll(false)} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false })}>
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={() => setConfirmClearAll(false)}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: false,
+                  })}
+                >
                   Cancel
                 </button>
-                <button onClick={doClearAll} disabled={!canAct} style={buttonStyle({ bg: COLOR_RED, fg: "white", disabled: !canAct })}>
+                <button
+                  onClick={doClearAll}
+                  disabled={!canAct}
+                  style={buttonStyle({
+                    bg: COLOR_RED,
+                    fg: "white",
+                    disabled: !canAct,
+                  })}
+                >
                   Clear Everything
                 </button>
               </div>
@@ -1340,11 +2362,22 @@ export default function AdminPage() {
               }}
             >
               {/* Top bar */}
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
                 <div>
-                  <div style={{ fontWeight: 1100, fontSize: 18 }}>Queue Manager — Area {queuePad.id}</div>
+                  <div style={{ fontWeight: 1100, fontSize: 18 }}>
+                    Queue Manager — Area {queuePad.id}
+                  </div>
                   <div style={{ fontSize: 13, opacity: 0.8 }}>
-                    NOW {queuePad.now ? 1 : 0} • ON {queuePad.onDeck ? 1 : 0} • STBY {queuePad.standby?.length ?? 0}
+                    NOW {queuePad.now ? 1 : 0} • ON {queuePad.onDeck ? 1 : 0} •
+                    STBY {queuePad.standby?.length ?? 0}
                   </div>
                 </div>
 
@@ -1366,7 +2399,14 @@ export default function AdminPage() {
               </div>
 
               {/* Tabs */}
-              <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <div
+                style={{
+                  marginTop: 12,
+                  display: "flex",
+                  gap: 8,
+                  flexWrap: "wrap",
+                }}
+              >
                 {(["NOW", "ONDECK", "STANDBY"] as QueueFocus[]).map((t) => {
                   const active = queueFocus === t;
                   return (
@@ -1375,7 +2415,9 @@ export default function AdminPage() {
                       onClick={() => setQueueFocus(t)}
                       style={{
                         ...buttonStyle({
-                          bg: active ? "rgba(255,215,64,0.90)" : "rgba(0,0,0,0.22)",
+                          bg: active
+                            ? "rgba(255,215,64,0.90)"
+                            : "rgba(0,0,0,0.22)",
                           fg: active ? "#111" : "white",
                           disabled: false,
                         }),
@@ -1394,141 +2436,363 @@ export default function AdminPage() {
                 })}
               </div>
 
-              {/* NOW + ONDECK cards */}
-              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {/* NOW */}
-                <div style={{ borderRadius: 14, padding: 12, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <div style={{ fontWeight: 1000 }}>NOW</div>
+              {/* NOW (Primary) */}
+              <div style={{ marginTop: 12 }}>
+                <PadPrimarySection
+                  variant="control"
+                  statusAccent="rgba(255,255,255,0.16)"
+                  statusBadge={
+                    <span style={chipStyle("rgba(255,255,255,0.16)", "white")}>
+                      NOW
+                    </span>
+                  }
+                  competitorContent={
+                    <>
+                      {queuePad.now ? (
+                        queuePad.now.name
+                      ) : (
+                        <span style={{ opacity: 0.6 }}>— empty —</span>
+                      )}
+                      {queuePad.now ? (
+                        <div
+                          style={{
+                            marginTop: 3,
+                            opacity: 0.8,
+                            fontFamily:
+                              "ui-monospace, SFMono-Regular, Menlo, monospace",
+                            fontSize: 11,
+                          }}
+                        >
+                          {queuePad.now.id}
+                        </div>
+                      ) : null}
+                    </>
+                  }
+                  actions={
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <button disabled={!canAct || !queuePad.now} onClick={() => qmDemote(queuePad.id, "NOW", "TOP")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || !queuePad.now })}>
+                      <button
+                        disabled={!canAct || !queuePad.now}
+                        onClick={() => qmDemote(queuePad.id, "NOW", "TOP")}
+                        style={buttonStyle({
+                          bg: "rgba(0,0,0,0.22)",
+                          disabled: !canAct || !queuePad.now,
+                        })}
+                      >
                         Demote → Top
                       </button>
-                      <button disabled={!canAct || !queuePad.now} onClick={() => qmDemote(queuePad.id, "NOW", "END")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || !queuePad.now })}>
+                      <button
+                        disabled={!canAct || !queuePad.now}
+                        onClick={() => qmDemote(queuePad.id, "NOW", "END")}
+                        style={buttonStyle({
+                          bg: "rgba(0,0,0,0.22)",
+                          disabled: !canAct || !queuePad.now,
+                        })}
+                      >
                         Demote → End
                       </button>
                     </div>
-                  </div>
-
-                  <div style={{ marginTop: 10, fontWeight: 950 }}>
-                    {queuePad.now ? queuePad.now.name : <span style={{ opacity: 0.6 }}>— empty —</span>}
-                  </div>
-                  <div style={{ marginTop: 3, opacity: 0.8, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>{queuePad.now ? queuePad.now.id : ""}</div>
-                </div>
-
-                {/* ON DECK */}
-                <div style={{ borderRadius: 14, padding: 12, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <div style={{ fontWeight: 1000 }}>ON DECK</div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <button disabled={!canAct} onClick={() => qmSwap(queuePad.id)} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct })}>
-                        Swap NOW/ON
-                      </button>
-                      <button disabled={!canAct || !queuePad.onDeck} onClick={() => qmDemote(queuePad.id, "ONDECK", "TOP")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || !queuePad.onDeck })}>
-                        Demote → Top
-                      </button>
-                      <button disabled={!canAct || !queuePad.onDeck} onClick={() => qmDemote(queuePad.id, "ONDECK", "END")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || !queuePad.onDeck })}>
-                        Demote → End
-                      </button>
-                    </div>
-                  </div>
-
-                  <div style={{ marginTop: 10, fontWeight: 950 }}>
-                    {queuePad.onDeck ? queuePad.onDeck.name : <span style={{ opacity: 0.6 }}>— empty —</span>}
-                  </div>
-                  <div style={{ marginTop: 3, opacity: 0.8, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>{queuePad.onDeck ? queuePad.onDeck.id : ""}</div>
-                </div>
+                  }
+                />
               </div>
 
+              {/* ON DECK */}
+              <PadOnDeckSection
+                variant="control"
+                label="ON DECK"
+                labelRight="NEXT"
+                actions={
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      disabled={!canAct}
+                      onClick={() => qmSwap(queuePad.id)}
+                      style={buttonStyle({
+                        bg: "rgba(0,0,0,0.22)",
+                        disabled: !canAct,
+                      })}
+                    >
+                      Swap NOW/ON
+                    </button>
+                    <button
+                      disabled={!canAct || !queuePad.onDeck}
+                      onClick={() => qmDemote(queuePad.id, "ONDECK", "TOP")}
+                      style={buttonStyle({
+                        bg: "rgba(0,0,0,0.22)",
+                        disabled: !canAct || !queuePad.onDeck,
+                      })}
+                    >
+                      Demote → Top
+                    </button>
+                    <button
+                      disabled={!canAct || !queuePad.onDeck}
+                      onClick={() => qmDemote(queuePad.id, "ONDECK", "END")}
+                      style={buttonStyle({
+                        bg: "rgba(0,0,0,0.22)",
+                        disabled: !canAct || !queuePad.onDeck,
+                      })}
+                    >
+                      Demote → End
+                    </button>
+                  </div>
+                }
+              >
+                <>
+                  {queuePad.onDeck ? (
+                    queuePad.onDeck.name
+                  ) : (
+                    <span style={{ opacity: 0.6 }}>— empty —</span>
+                  )}
+                  {queuePad.onDeck ? (
+                    <div
+                      style={{
+                        marginTop: 3,
+                        opacity: 0.8,
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        fontSize: 11,
+                      }}
+                    >
+                      {queuePad.onDeck.id}
+                    </div>
+                  ) : null}
+                </>
+              </PadOnDeckSection>
+
               {/* Add participant (Standby) */}
-              <div style={{ marginTop: 12, borderRadius: 14, padding: 12, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)" }}>
-                <div style={{ fontWeight: 950 }}>Add Participant (Standby)</div>
-                <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 220px 140px", gap: 10 }}>
-                  <input value={qmAddName} onChange={(e) => setQmAddName(e.target.value)} placeholder="Team Name (required)" style={flatInput} />
-                  <input value={qmAddId} onChange={(e) => setQmAddId(e.target.value)} placeholder="Team ID (required)" style={flatInput} />
-                  <button disabled={!canAct} onClick={() => qmAddToStandby(queuePad.id)} style={buttonStyle({ bg: "rgba(255,215,64,0.92)", fg: "#111", disabled: !canAct })}>
+              <div
+                style={{
+                  marginTop: 12,
+                  borderRadius: 10,
+                  padding: 12,
+                  background: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                }}
+              >
+                <div style={{ fontWeight: 950, fontSize: 13 }}>
+                  Add Participant (Standby)
+                </div>
+                <div
+                  style={{
+                    marginTop: 8,
+                    display: "grid",
+                    gridTemplateColumns: "1fr 220px 140px",
+                    gap: 10,
+                  }}
+                >
+                  <input
+                    value={qmAddName}
+                    onChange={(e) => setQmAddName(e.target.value)}
+                    placeholder="Team Name (required)"
+                    style={flatInput}
+                  />
+                  <input
+                    value={qmAddId}
+                    onChange={(e) => setQmAddId(e.target.value)}
+                    placeholder="Team ID (required)"
+                    style={flatInput}
+                  />
+                  <button
+                    disabled={!canAct}
+                    onClick={() => qmAddToStandby(queuePad.id)}
+                    style={buttonStyle({
+                      bg: "rgba(255,215,64,0.92)",
+                      fg: "#111",
+                      disabled: !canAct,
+                    })}
+                  >
                     Add
                   </button>
                 </div>
               </div>
 
               {/* Standby list */}
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontWeight: 950, opacity: 0.95 }}>STANDBY ({queuePad.standby?.length ?? 0})</div>
-
+              <PadStandbySection
+                variant="control"
+                count={queuePad.standby?.length ?? 0}
+              >
                 {(queuePad.standby ?? []).length === 0 ? (
-                  <div style={{ opacity: 0.75, padding: 10 }}>No standby participants.</div>
+                  <div style={{ opacity: 0.75 }}>No standby participants.</div>
                 ) : (
-                  (queuePad.standby ?? []).map((t: Team, idx: number) => {
-                    const isEditing = qmEditOriginalId === t.id;
+                  <div
+                    style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                  >
+                    {(queuePad.standby ?? []).map((t: Team, idx: number) => {
+                      const isEditing = qmEditOriginalId === t.id;
 
-                    return (
-                      <div
-                        key={t.id}
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "60px 1fr 220px 260px 260px",
-                          gap: 10,
-                          alignItems: "center",
-                          padding: "10px 12px",
-                          borderRadius: 14,
-                          background: "rgba(0,0,0,0.14)",
-                          border: "1px solid rgba(255,255,255,0.10)",
-                        }}
-                      >
-                        <div style={{ fontWeight: 900, opacity: 0.9 }}>#{idx + 1}</div>
+                      return (
+                        <div
+                          key={t.id}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "60px 1fr 220px 260px 260px",
+                            gap: 10,
+                            alignItems: "center",
+                            padding: "10px 12px",
+                            borderRadius: 14,
+                            background: "rgba(0,0,0,0.14)",
+                            border: "1px solid rgba(255,255,255,0.10)",
+                          }}
+                        >
+                          <div style={{ fontWeight: 900, opacity: 0.9 }}>
+                            #{idx + 1}
+                          </div>
 
-                        {isEditing ? <input value={qmEditName} onChange={(e) => setQmEditName(e.target.value)} style={flatInput} /> : <div style={{ fontWeight: 900 }}>{t.name}</div>}
-
-                        {isEditing ? <input value={qmEditId} onChange={(e) => setQmEditId(e.target.value)} style={flatInput} /> : <div style={{ opacity: 0.85, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>{t.id}</div>}
-
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button disabled={!canAct || idx === 0} onClick={() => qmMoveStandby(queuePad.id, idx, idx - 1)} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || idx === 0 })} title="Move up">
-                            ▲
-                          </button>
-                          <button
-                            disabled={!canAct || idx === (queuePad.standby?.length ?? 1) - 1}
-                            onClick={() => qmMoveStandby(queuePad.id, idx, idx + 1)}
-                            style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct || idx === (queuePad.standby?.length ?? 1) - 1 })}
-                            title="Move down"
-                          >
-                            ▼
-                          </button>
-
-                          <button disabled={!canAct} onClick={() => qmSetSlot(queuePad.id, t.id, "NOW")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct })}>
-                            Set NOW
-                          </button>
-                          <button disabled={!canAct} onClick={() => qmSetSlot(queuePad.id, t.id, "ONDECK")} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct })}>
-                            Set ON
-                          </button>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
                           {isEditing ? (
-                            <>
-                              <button disabled={!canAct} onClick={() => saveEditTeam(queuePad.id)} style={buttonStyle({ bg: "rgba(255,215,64,0.92)", fg: "#111", disabled: !canAct })}>
-                                Save
-                              </button>
-                              <button onClick={cancelEdit} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: false })}>
-                                Cancel
-                              </button>
-                            </>
+                            <input
+                              value={qmEditName}
+                              onChange={(e) => setQmEditName(e.target.value)}
+                              style={flatInput}
+                            />
                           ) : (
-                            <>
-                              <button disabled={!canAct} onClick={() => startEdit(t.id, t.name)} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct })}>
-                                Edit
-                              </button>
-                              <button disabled={!canAct} onClick={() => qmRemoveStandby(queuePad.id, t.id)} style={buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct })}>
-                                Remove
-                              </button>
-                            </>
+                            <div style={{ fontWeight: 900 }}>{t.name}</div>
                           )}
+
+                          {isEditing ? (
+                            <input
+                              value={qmEditId}
+                              onChange={(e) => setQmEditId(e.target.value)}
+                              style={flatInput}
+                            />
+                          ) : (
+                            <div
+                              style={{
+                                opacity: 0.85,
+                                fontFamily:
+                                  "ui-monospace, SFMono-Regular, Menlo, monospace",
+                              }}
+                            >
+                              {t.id}
+                            </div>
+                          )}
+
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 8,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              disabled={!canAct || idx === 0}
+                              onClick={() =>
+                                qmMoveStandby(queuePad.id, idx, idx - 1)
+                              }
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.22)",
+                                disabled: !canAct || idx === 0,
+                              })}
+                              title="Move up"
+                            >
+                              ▲
+                            </button>
+                            <button
+                              disabled={
+                                !canAct ||
+                                idx === (queuePad.standby?.length ?? 1) - 1
+                              }
+                              onClick={() =>
+                                qmMoveStandby(queuePad.id, idx, idx + 1)
+                              }
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.22)",
+                                disabled:
+                                  !canAct ||
+                                  idx === (queuePad.standby?.length ?? 1) - 1,
+                              })}
+                              title="Move down"
+                            >
+                              ▼
+                            </button>
+
+                            <button
+                              disabled={!canAct}
+                              onClick={() =>
+                                qmSetSlot(queuePad.id, t.id, "NOW")
+                              }
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.22)",
+                                disabled: !canAct,
+                              })}
+                            >
+                              Set NOW
+                            </button>
+                            <button
+                              disabled={!canAct}
+                              onClick={() =>
+                                qmSetSlot(queuePad.id, t.id, "ONDECK")
+                              }
+                              style={buttonStyle({
+                                bg: "rgba(0,0,0,0.22)",
+                                disabled: !canAct,
+                              })}
+                            >
+                              Set ON
+                            </button>
+                          </div>
+
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 8,
+                              justifyContent: "flex-end",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            {isEditing ? (
+                              <>
+                                <button
+                                  disabled={!canAct}
+                                  onClick={() => saveEditTeam(queuePad.id)}
+                                  style={buttonStyle({
+                                    bg: "rgba(255,215,64,0.92)",
+                                    fg: "#111",
+                                    disabled: !canAct,
+                                  })}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={cancelEdit}
+                                  style={buttonStyle({
+                                    bg: "rgba(0,0,0,0.22)",
+                                    disabled: false,
+                                  })}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  disabled={!canAct}
+                                  onClick={() => startEdit(t.id, t.name)}
+                                  style={buttonStyle({
+                                    bg: "rgba(0,0,0,0.22)",
+                                    disabled: !canAct,
+                                  })}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  disabled={!canAct}
+                                  onClick={() =>
+                                    qmRemoveStandby(queuePad.id, t.id)
+                                  }
+                                  style={buttonStyle({
+                                    bg: "rgba(0,0,0,0.22)",
+                                    disabled: !canAct,
+                                  })}
+                                >
+                                  Remove
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
                 )}
-              </div>
+              </PadStandbySection>
             </div>
           </div>
         ) : null}
@@ -1538,16 +2802,55 @@ export default function AdminPage() {
            ======================= */}
         {addModalPadId != null ? (
           <div onClick={closeAddModal} style={{ ...modalBackdrop, zIndex: 90 }}>
-            <div onClick={(e) => e.stopPropagation()} style={{ ...modalCard, width: "min(620px, 100%)" }}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>Add Participant — Area {addModalPadId}</div>
-              <div style={{ marginTop: 8, opacity: 0.8, fontSize: 13, lineHeight: 1.35 }}>Quick insert. (Queue Manager is recommended for full control.)</div>
-
-              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 220px", gap: 10 }}>
-                <input value={addTeamName} onChange={(e) => setAddTeamName(e.target.value)} placeholder="Team Name (required)" style={flatInput} />
-                <input value={addTeamId} onChange={(e) => setAddTeamId(e.target.value)} placeholder="Team ID (required)" style={flatInput} />
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ ...modalCard, width: "min(620px, 100%)" }}
+            >
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                Add Participant — Area {addModalPadId}
+              </div>
+              <div
+                style={{
+                  marginTop: 8,
+                  opacity: 0.8,
+                  fontSize: 13,
+                  lineHeight: 1.35,
+                }}
+              >
+                Quick insert. (Queue Manager is recommended for full control.)
               </div>
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "220px 1fr", gap: 10, alignItems: "center" }}>
+              <div
+                style={{
+                  marginTop: 12,
+                  display: "grid",
+                  gridTemplateColumns: "1fr 220px",
+                  gap: 10,
+                }}
+              >
+                <input
+                  value={addTeamName}
+                  onChange={(e) => setAddTeamName(e.target.value)}
+                  placeholder="Team Name (required)"
+                  style={flatInput}
+                />
+                <input
+                  value={addTeamId}
+                  onChange={(e) => setAddTeamId(e.target.value)}
+                  placeholder="Team ID (required)"
+                  style={flatInput}
+                />
+              </div>
+
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gridTemplateColumns: "220px 1fr",
+                  gap: 10,
+                  alignItems: "center",
+                }}
+              >
                 <select
                   value={addWhere}
                   onChange={(e) => setAddWhere(e.target.value as AddWhere)}
@@ -1566,21 +2869,54 @@ export default function AdminPage() {
                 </select>
 
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
-                  Emits: <span style={{ opacity: 0.95 }}>admin:team:add</span> — <span style={{ opacity: 0.95 }}>{"{ padId, where, teamName, teamId }"}</span>
+                  Emits: <span style={{ opacity: 0.95 }}>admin:team:add</span> —{" "}
+                  <span style={{ opacity: 0.95 }}>
+                    {"{ padId, where, teamName, teamId }"}
+                  </span>
                 </div>
               </div>
 
               {addError ? (
-                <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: `1px solid ${COLOR_RED}`, background: "rgba(198,40,40,0.16)" }}>
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 10,
+                    borderRadius: 12,
+                    border: `1px solid ${COLOR_RED}`,
+                    background: "rgba(198,40,40,0.16)",
+                  }}
+                >
                   <b>Error:</b> {addError}
                 </div>
               ) : null}
 
-              <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                <button onClick={closeAddModal} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false })}>
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={closeAddModal}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: false,
+                  })}
+                >
                   Cancel
                 </button>
-                <button onClick={confirmAddParticipant} disabled={!canAct} style={buttonStyle({ bg: "var(--cacc-gold)", fg: "#111", disabled: !canAct })}>
+                <button
+                  onClick={confirmAddParticipant}
+                  disabled={!canAct}
+                  style={buttonStyle({
+                    bg: "var(--cacc-gold)",
+                    fg: "#111",
+                    disabled: !canAct,
+                  })}
+                >
                   Add Participant
                 </button>
               </div>
@@ -1592,20 +2928,54 @@ export default function AdminPage() {
             Delete area confirm modal
            ======================= */}
         {confirmDeletePadId != null && (
-          <div onClick={() => setConfirmDeletePadId(null)} style={{ ...modalBackdrop, zIndex: 80 }}>
+          <div
+            onClick={() => setConfirmDeletePadId(null)}
+            style={{ ...modalBackdrop, zIndex: 80 }}
+          >
             <div onClick={(e) => e.stopPropagation()} style={modalCard}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>Delete Area {confirmDeletePadId}?</div>
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                Delete Area {confirmDeletePadId}?
+              </div>
 
-              <div style={{ marginTop: 10, opacity: 0.85, fontSize: 13, lineHeight: 1.35 }}>
+              <div
+                style={{
+                  marginTop: 10,
+                  opacity: 0.85,
+                  fontSize: 13,
+                  lineHeight: 1.35,
+                }}
+              >
                 This removes the area from Admin/Judge/Public immediately.
               </div>
 
-              <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                <button onClick={() => setConfirmDeletePadId(null)} style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false })}>
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={() => setConfirmDeletePadId(null)}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: false,
+                  })}
+                >
                   Cancel
                 </button>
 
-                <button onClick={confirmDelete} disabled={!canAct} style={buttonStyle({ bg: COLOR_RED, fg: "white", disabled: !canAct })}>
+                <button
+                  onClick={confirmDelete}
+                  disabled={!canAct}
+                  style={buttonStyle({
+                    bg: COLOR_RED,
+                    fg: "white",
+                    disabled: !canAct,
+                  })}
+                >
                   Yes, Delete
                 </button>
               </div>
@@ -1645,7 +3015,11 @@ function AreaRow({
   const standbyCount = pad.standby?.length ?? 0;
 
   // Smart default focus
-  const smartFocus: QueueFocus = !pad.now ? "NOW" : !pad.onDeck ? "ONDECK" : "STANDBY";
+  const smartFocus: QueueFocus = !pad.now
+    ? "NOW"
+    : !pad.onDeck
+      ? "ONDECK"
+      : "STANDBY";
 
   const inputStyle: React.CSSProperties = {
     height: 34,
@@ -1658,7 +3032,11 @@ function AreaRow({
     width: "100%",
   };
 
-  const smallBtn = (opts: { bg: string; fg?: string; disabled?: boolean }): React.CSSProperties => ({
+  const smallBtn = (opts: {
+    bg: string;
+    fg?: string;
+    disabled?: boolean;
+  }): React.CSSProperties => ({
     ...buttonStyle({ bg: opts.bg, fg: opts.fg, disabled: !!opts.disabled }),
     display: "inline-flex",
     alignItems: "center",
@@ -1705,12 +3083,26 @@ function AreaRow({
     >
       <div style={{ fontWeight: 950 }}>#{pad.id}</div>
 
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Area name" style={inputStyle} />
-      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Area label" style={inputStyle} />
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Area name"
+        style={inputStyle}
+      />
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        placeholder="Area label"
+        style={inputStyle}
+      />
 
       {/* Queue + indicators (THIS matches your screenshot layout) */}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={() => onOpenQueue(smartFocus)} style={smallBtn({ bg: "rgba(33,150,243,0.28)" })} title="Open Queue Manager">
+        <button
+          onClick={() => onOpenQueue(smartFocus)}
+          style={smallBtn({ bg: "rgba(33,150,243,0.28)" })}
+          title="Open Queue Manager"
+        >
           Manage Queue
         </button>
 
@@ -1721,15 +3113,32 @@ function AreaRow({
 
       {/* Actions */}
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-        <button disabled={!canAct} onClick={() => onSave(name, label)} style={smallBtn({ bg: "rgba(255,215,64,0.90)", fg: "#111", disabled: !canAct })}>
+        <button
+          disabled={!canAct}
+          onClick={() => onSave(name, label)}
+          style={smallBtn({
+            bg: "rgba(255,215,64,0.90)",
+            fg: "#111",
+            disabled: !canAct,
+          })}
+        >
           Save
         </button>
 
-        <button disabled={!canAct} onClick={onAddParticipant} style={smallBtn({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })} title="Quick add participant (legacy)">
+        <button
+          disabled={!canAct}
+          onClick={onAddParticipant}
+          style={smallBtn({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}
+          title="Quick add participant (legacy)"
+        >
           Add Participant
         </button>
 
-        <button disabled={!canAct} onClick={onDelete} style={smallBtn({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}>
+        <button
+          disabled={!canAct}
+          onClick={onDelete}
+          style={smallBtn({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}
+        >
           Delete
         </button>
       </div>
@@ -1737,6 +3146,8 @@ function AreaRow({
   );
 }
 
-export async function getServerSideProps(ctx: import("next").GetServerSidePropsContext) {
+export async function getServerSideProps(
+  ctx: import("next").GetServerSidePropsContext,
+) {
   return requireAdminRole(ctx, "admin");
 }

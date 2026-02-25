@@ -2,6 +2,12 @@
 import Head from "next/head";
 import { useEffect, useMemo, useState } from "react";
 import PublicBoard from "@/components/PublicBoard";
+import { setRoleCookie } from "@/lib/auth";
+
+export async function getServerSideProps(ctx: import("next").GetServerSidePropsContext) {
+  setRoleCookie(ctx.res, "public");
+  return { props: {} };
+}
 
 function useKioskFlag() {
   const [kiosk, setKiosk] = useState(false);
