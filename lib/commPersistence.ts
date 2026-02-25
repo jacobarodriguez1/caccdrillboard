@@ -26,7 +26,15 @@ const DEBOUNCE_MS = 1000;
 function getCommStatePath(): string {
   const envPath = process.env.COMM_STATE_PATH?.trim();
   if (envPath) return path.isAbsolute(envPath) ? envPath : path.join(process.cwd(), envPath);
-  return path.join(process.cwd(), "data", COMM_STATE_FILENAME);
+
+  // Fly: writable persistent volume is mounted at /data (via fly.toml [[mounts]])
+  // Local dev: use ./data under the repo root
+  const baseDir =
+    process.env.NODE_ENV === "production"
+      ? "/data"
+      : path.join(process.cwd(), "data");
+
+  return path.join(baseDir, COMM_STATE_FILENAME);
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -81,7 +89,13 @@ export function loadCommState(): Record<number, PersistedChatMessage[]> {
     if (padId == null) continue;
     if (!Array.isArray(v)) continue;
     const msgs = v
-      .filter((m): m is Record<string, unknown> => m != null && typeof m === "object" && typeof (m as any).id === "string" && typeof (m as any).text === "string")
+      .filter(
+        (m): m is Record<string, unknown> =>
+          m != null &&
+          typeof m === "object" &&
+          typeof (m as any).id === "string" &&
+          typeof (m as any).text === "string"
+      )
       .map((m) => {
         const ts = Number((m as any).ts);
         const ackedNum = (m as any).ackedAt;
@@ -95,7 +109,9 @@ export function loadCommState(): Record<number, PersistedChatMessage[]> {
           ackedAt: ackedAt != null && Number.isFinite(ackedAt) ? ackedAt : undefined,
         };
       })
-      .filter((m) => Number.isFinite(m.ts) && !Number.isNaN(m.ts) && m.ts !== Infinity && m.ts !== -Infinity) as PersistedChatMessage[];
+      .filter(
+        (m) => Number.isFinite(m.ts) && !Number.isNaN(m.ts) && m.ts !== Infinity && m.ts !== -Infinity
+      ) as PersistedChatMessage[];
     result[padId] = msgs;
   }
   return result;
@@ -120,9 +136,7 @@ export function scheduleCommSave(getChannels: () => Record<number, PersistedChat
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
       const toWrite: PersistedCommState = {
-        channels: Object.fromEntries(
-          Object.entries(channels).map(([k, v]) => [String(k), v])
-        ),
+        channels: Object.fromEntries(Object.entries(channels).map(([k, v]) => [String(k), v])),
       };
       const tmpPath = filePath + ".tmp";
       fs.writeFileSync(tmpPath, JSON.stringify(toWrite, null, 2), "utf8");
