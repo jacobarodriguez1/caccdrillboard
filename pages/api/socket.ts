@@ -7,6 +7,9 @@ import { Server as IOServer } from "socket.io";
 import type { BoardState, Pad, Team, PadStatus, ScheduleEvent, CycleStats } from "@/lib/state";
 import { createInitialState, createPad } from "@/lib/state";
 import { buildStateFromRosterCsv } from "@/lib/roster";
+import { parseCookie } from "@/lib/ui";
+import { verifyRoleCookie } from "@/lib/auth";
+import { loadCommState, scheduleCommSave } from "@/lib/commPersistence";
 
 type NextResWithSocket = NextApiResponse & { socket: any & { server: any } };
 
@@ -41,14 +44,39 @@ type ChatMessage = {
   text: string;
 };
 
-type CommSnapshot = {
-  judges: JudgePresence[];
-  chats: Record<string, ChatMessage[]>; // keyed by judge socketId
+type PadChannel = {
+  padId: number;
+  name: string;
+  online: boolean;
+  messages: ChatMessage[];
 };
 
-const MAX_CHAT_PER_JUDGE = 220;
+type CommSnapshot = {
+  channels: PadChannel[];
+};
+
+const MAX_CHAT_PER_PAD = 220;
 
 const G = globalThis as any;
+
+const FORBIDDEN_KEYS = /^(__proto__|constructor|prototype)$/;
+
+function isPlainObject(obj: unknown): obj is Record<string, unknown> {
+  return obj !== null && typeof obj === "object" && Object.getPrototypeOf(obj) === Object.prototype;
+}
+
+/** Safe patch: plain object, only allowed keys, no prototype pollution. */
+function safePatch(obj: unknown, allowedKeys: string[]): Record<string, unknown> | null {
+  if (!obj || typeof obj !== "object") return null;
+  if (!isPlainObject(obj)) return null;
+  const out: Record<string, unknown> = {};
+  for (const k of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(obj, k) && !FORBIDDEN_KEYS.test(String(k))) {
+      out[k] = obj[k];
+    }
+  }
+  return out;
+}
 
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -60,10 +88,27 @@ function ensureGlobals() {
   if (!G.audit) G.audit = [];
   if (typeof G.rosterLoaded !== "boolean") G.rosterLoaded = false;
 
-  // comm
-  if (!G.commAdmins) G.commAdmins = new Set<string>(); // socketIds
-  if (!G.commJudges) G.commJudges = new Map<string, JudgePresence>(); // socketId -> presence
-  if (!G.commChats) G.commChats = new Map<string, ChatMessage[]>(); // judgeSocketId -> messages
+  // comm (pad-based channels)
+  if (!G.commAdmins) G.commAdmins = new Set<string>();
+  if (!G.commJudges) G.commJudges = new Map<string, JudgePresence>(); // socketId -> presence (for online tracking)
+  if (!G.commChannels) G.commChannels = {} as Record<number, ChatMessage[]>; // padId -> messages
+  if (!G.commPadViewers) G.commPadViewers = new Map<number, Set<string>>(); // padId -> socketIds viewing
+}
+
+function loadCommChannelsIfNeeded() {
+  ensureGlobals();
+  if (G.commChannelsLoaded) return;
+  const loaded = loadCommState();
+  const channels = G.commChannels as Record<number, ChatMessage[]>;
+  for (const [k, msgs] of Object.entries(loaded)) {
+    const id = Math.floor(Number(k));
+    if (Number.isFinite(id) && id >= 1 && Array.isArray(msgs)) channels[id] = msgs as ChatMessage[];
+  }
+  G.commChannelsLoaded = true;
+}
+
+function scheduleCommPersist() {
+  scheduleCommSave(() => (G.commChannels as Record<number, ChatMessage[]>) ?? {});
 }
 
 function pushAudit(entry: Omit<AuditEntry, "id">) {
@@ -383,21 +428,35 @@ function advanceWithoutComplete(pad: Pad, nowMs: number) {
   startReportTimerForNow(pad, nowMs);
 }
 
-/** ---------- COMM helpers ---------- */
+/** ---------- COMM helpers (pad-based) ---------- */
+function ensureChannelsForPads() {
+  ensureGlobals();
+  const pads = (G.boardState as BoardState | null)?.pads ?? [];
+  const channels = G.commChannels as Record<number, ChatMessage[]>;
+  for (const p of pads) {
+    const id = Number(p.id);
+    if (!Number.isFinite(id)) continue;
+    if (!Array.isArray(channels[id])) channels[id] = [];
+  }
+}
+
 function getCommSnapshot(): CommSnapshot {
   ensureGlobals();
-  const judges: JudgePresence[] = Array.from(
-  (G.commJudges.values() as Iterable<JudgePresence>)
-)
-  .slice()
-  .sort((a, b) => a.connectedAt - b.connectedAt);
+  ensureChannelsForPads();
+  const pads = (G.boardState as BoardState | null)?.pads ?? [];
+  const channels = G.commChannels as Record<number, ChatMessage[]>;
+  const padViewers = G.commPadViewers as Map<number, Set<string>>;
 
+  const result: PadChannel[] = pads.map((p) => {
+    const id = Number(p.id);
+    const viewers = padViewers.get(id);
+    const online = !!(viewers && viewers.size > 0);
+    const name = `Pad ${id}`;
+    const messages = (channels[id] ?? []).slice(-120);
+    return { padId: id, name, online, messages };
+  });
 
-  const chats: Record<string, ChatMessage[]> = {};
-  for (const j of judges) {
-    chats[j.socketId] = (G.commChats.get(j.socketId) ?? []).slice(-120);
-  }
-  return { judges, chats };
+  return { channels: result };
 }
 
 function emitComm(io: IOServer) {
@@ -405,12 +464,15 @@ function emitComm(io: IOServer) {
   io.emit("comm:snapshot", snap);
 }
 
-function appendChat(io: IOServer, judgeSocketId: string, msg: ChatMessage) {
+function appendChatToPad(io: IOServer, padId: number, msg: ChatMessage) {
   ensureGlobals();
-  const cur = G.commChats.get(judgeSocketId) ?? [];
+  ensureChannelsForPads();
+  const channels = G.commChannels as Record<number, ChatMessage[]>;
+  const cur = channels[padId] ?? [];
   cur.push(msg);
-  if (cur.length > MAX_CHAT_PER_JUDGE) cur.splice(0, cur.length - MAX_CHAT_PER_JUDGE);
-  G.commChats.set(judgeSocketId, cur);
+  if (cur.length > MAX_CHAT_PER_PAD) cur.splice(0, cur.length - MAX_CHAT_PER_PAD);
+  channels[padId] = cur;
+  scheduleCommPersist();
   emitComm(io);
 }
 
@@ -426,9 +488,34 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
     res.socket.server.io = io;
     G.io = io;
 
+    loadCommChannelsIfNeeded();
+
+    // Derive role from HMAC-signed cookie. Invalid/missing → public. Allow all to connect.
+    io.use((socket, next) => {
+      const cookieHeader = socket.handshake.headers.cookie;
+      const cookies = parseCookie(cookieHeader);
+      const signedValue = cookies["cacc_role"] ?? "";
+      const authed = cookies["cacc_admin"] === "1";
+
+      const role = verifyRoleCookie(signedValue);
+      // admin/judge require valid signed cookie AND cacc_admin=1
+      if (role === "admin" && authed) {
+        (socket as any).data = (socket as any).data ?? {};
+        (socket as any).data.role = "admin";
+      } else if (role === "judge" && authed) {
+        (socket as any).data = (socket as any).data ?? {};
+        (socket as any).data.role = "judge";
+      } else {
+        (socket as any).data = (socket as any).data ?? {};
+        (socket as any).data.role = "public";
+      }
+      next();
+    });
+
     const emitState = () => {
       loadStateIfNeeded();
       sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+      ensureChannelsForPads();
       io.emit("state", G.boardState);
       io.emit("audit", G.audit);
     };
@@ -442,6 +529,25 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
       // send comm snapshot to new connection
       socket.emit("comm:snapshot", getCommSnapshot());
+
+      // Wrap socket.on so handlers don't crash the connection on error
+      const originalOn = socket.on.bind(socket);
+      (socket as any).on = (event: string, handler: (...args: any[]) => void) => {
+        originalOn(event, (...args: any[]) => {
+          try {
+            handler(...args);
+          } catch (e) {
+            console.error(`[socket] ${event} error:`, e);
+          }
+        });
+      };
+
+      socket.on("getState", () => {
+        loadStateIfNeeded();
+        sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+        socket.emit("state", G.boardState);
+        socket.emit("audit", G.audit);
+      });
 
       const doLoadRoster = () => {
         const nowMs = Date.now();
@@ -480,107 +586,119 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       };
 
       // =========================
-      // COMM: REGISTER / PRESENCE
+      // COMM: REGISTER (admin only) / JOIN PAD (judge)
       // =========================
       socket.on("comm:register", (payload: any) => {
         ensureGlobals();
-        const nowMs = Date.now();
-        const role = String(payload?.role ?? "").toLowerCase() as CommRole;
-
+        const role = (socket as any).data?.role;
         if (role === "admin") {
           G.commAdmins.add(socket.id);
-          (socket as any).data = (socket as any).data ?? {};
           (socket as any).data.commRole = "admin";
-          emitComm(io);
-          return;
-        }
-
-        if (role === "judge") {
-          const padId = payload?.padId != null ? Number(payload.padId) : null;
-          const name = payload?.name != null ? String(payload.name).trim() : null;
-
-          const prev = G.commJudges.get(socket.id);
-          const base: JudgePresence = prev ?? {
-            socketId: socket.id,
-            connectedAt: nowMs,
-            lastSeenAt: nowMs,
-            padId: Number.isFinite(padId as any) ? Math.floor(padId as any) : null,
-            name: name || null,
-          };
-
-          base.lastSeenAt = nowMs;
-          base.padId = Number.isFinite(padId as any) ? Math.floor(padId as any) : base.padId;
-          if (name) base.name = name;
-
-          G.commJudges.set(socket.id, base);
-          (socket as any).data = (socket as any).data ?? {};
-          (socket as any).data.commRole = "judge";
-
           emitComm(io);
         }
       });
 
+      socket.on("comm:joinPad", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
+        ensureGlobals();
+        ensureChannelsForPads();
+        const nowMs = Date.now();
+        const padId = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
+        if (!Number.isFinite(padId) || !getPadById(padId)) return;
+
+        const padViewers = G.commPadViewers as Map<number, Set<string>>;
+        const prevPadId = (socket as any).data?.padId;
+        if (Number.isFinite(prevPadId)) {
+          const prevSet = padViewers.get(prevPadId);
+          if (prevSet) {
+            prevSet.delete(socket.id);
+            if (prevSet.size === 0) padViewers.delete(prevPadId);
+          }
+        }
+
+        let set = padViewers.get(padId);
+        if (!set) {
+          set = new Set<string>();
+          padViewers.set(padId, set);
+        }
+        set.add(socket.id);
+
+        (socket as any).data.padId = padId;
+        (socket as any).data.commRole = "judge";
+
+        const prev = G.commJudges.get(socket.id);
+        const base: JudgePresence = prev ?? {
+          socketId: socket.id,
+          connectedAt: nowMs,
+          lastSeenAt: nowMs,
+          padId,
+          name: null,
+        };
+        base.lastSeenAt = nowMs;
+        base.padId = padId;
+        G.commJudges.set(socket.id, base);
+
+        emitComm(io);
+      });
+
       socket.on("comm:presence", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
         const nowMs = Date.now();
-
-        // only judges update presence
         const rec = G.commJudges.get(socket.id);
         if (!rec) return;
-
         const padId = payload?.padId != null ? Number(payload.padId) : null;
         const name = payload?.name != null ? String(payload.name).trim() : null;
-
         rec.lastSeenAt = nowMs;
-        rec.padId = Number.isFinite(padId as any) ? Math.floor(padId as any) : rec.padId;
+        if (Number.isFinite(padId)) rec.padId = Math.floor(padId);
         if (name) rec.name = name;
-
         G.commJudges.set(socket.id, rec);
         emitComm(io);
       });
 
       // =========================
-      // COMM: CHAT (admin -> judge)
+      // COMM: CHAT (admin -> pad channel)
       // =========================
       socket.on("admin:comm:send", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         ensureGlobals();
-        const toJudgeId = String(payload?.toJudgeId ?? "").trim();
+        const toPadId = payload?.toPadId != null ? Math.floor(Number(payload.toPadId)) : null;
         const text = String(payload?.text ?? "").trim();
-        if (!toJudgeId || !text) return;
-
-        // only allow sending to known judge channels
-        if (!G.commJudges.has(toJudgeId)) return;
+        if (!Number.isFinite(toPadId) || !text) return;
+        if (!getPadById(toPadId)) return;
 
         const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text };
-        appendChat(io, toJudgeId, msg);
+        appendChatToPad(io, toPadId, msg);
       });
 
-      // judge -> admin (their own channel)
+      // judge -> current pad channel
       socket.on("judge:comm:send", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
         const text = String(payload?.text ?? "").trim();
         if (!text) return;
-
-        // judge must be registered
-        if (!G.commJudges.has(socket.id)) return;
+        const padId = (socket as any).data?.padId;
+        if (!Number.isFinite(padId) || !getPadById(padId)) return;
 
         const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "JUDGE", text };
-        appendChat(io, socket.id, msg);
+        appendChatToPad(io, padId, msg);
       });
 
       // =========================
-      // COMM: BROADCAST (admin -> judges)
+      // COMM: BROADCAST (admin -> pad channels)
       // target = ALL | PAD
       // =========================
       socket.on("admin:comm:broadcast", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         ensureGlobals();
+        ensureChannelsForPads();
         const text = String(payload?.text ?? "").trim();
         if (!text) return;
 
         const target = String(payload?.target ?? "ALL").toUpperCase();
         const padId = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
 
-        const ttlSeconds = Math.max(20, Math.min(60 * 30, Number(payload?.ttlSeconds ?? 120))); // clamp 20s..30m
+        const ttlSeconds = Math.max(20, Math.min(60 * 30, Number(payload?.ttlSeconds ?? 120)));
         const broadcast = {
           id: uid(),
           ts: Date.now(),
@@ -590,23 +708,23 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
           ttlSeconds,
         };
 
-        const judges: JudgePresence[] = Array.from(
-          (G.commJudges.values() as Iterable<JudgePresence>)
-        );
+        const channels = G.commChannels as Record<number, ChatMessage[]>;
+        const pads = (G.boardState as BoardState)?.pads ?? [];
+        const padIds = target === "PAD" && Number.isFinite(padId) ? [padId] : pads.map((p) => Number(p.id)).filter(Number.isFinite);
 
-        const recipients: JudgePresence[] =
-          target === "PAD" && Number.isFinite(padId as any)
-            ? judges.filter((j) => j.padId === padId)
-            : judges;
-
-        for (const j of recipients) {
-          io.to(j.socketId).emit("comm:broadcast", broadcast);
-          // also log into their chat history (so admin can see it later)
-          const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text: `📣 BROADCAST: ${text}` };
-          const cur = G.commChats.get(j.socketId) ?? [];
+        const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text: `📣 BROADCAST: ${text}` };
+        for (const pid of padIds) {
+          const cur = channels[pid] ?? [];
           cur.push(msg);
-          if (cur.length > MAX_CHAT_PER_JUDGE) cur.splice(0, cur.length - MAX_CHAT_PER_JUDGE);
-          G.commChats.set(j.socketId, cur);
+          if (cur.length > MAX_CHAT_PER_PAD) cur.splice(0, cur.length - MAX_CHAT_PER_PAD);
+          channels[pid] = cur;
+        }
+        scheduleCommPersist();
+
+        const padViewers = G.commPadViewers as Map<number, Set<string>>;
+        const recipients = target === "PAD" && Number.isFinite(padId) ? (padViewers.get(padId) ?? new Set()) : new Set(pads.flatMap((p) => [...(padViewers.get(Number(p.id)) ?? [])]));
+        for (const sid of recipients) {
+          io.to(sid).emit("comm:broadcast", broadcast);
         }
 
         emitComm(io);
@@ -614,16 +732,19 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
       socket.on("disconnect", () => {
         ensureGlobals();
-        // cleanup admin
         G.commAdmins.delete(socket.id);
 
-        // cleanup judge
-        if (G.commJudges.has(socket.id)) {
-          G.commJudges.delete(socket.id);
-          // keep chat history (optional). If you want to remove it:
-          // G.commChats.delete(socket.id);
+        const padViewers = G.commPadViewers as Map<number, Set<string>>;
+        const prevPadId = (socket as any).data?.padId;
+        if (Number.isFinite(prevPadId)) {
+          const set = padViewers.get(prevPadId);
+          if (set) {
+            set.delete(socket.id);
+            if (set.size === 0) padViewers.delete(prevPadId);
+          }
         }
 
+        if (G.commJudges.has(socket.id)) G.commJudges.delete(socket.id);
         emitComm(io);
       });
 
@@ -631,6 +752,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // ADMIN: PADS ENSURE (CSV import)
       // =========================
       socket.on("admin:pads:ensure", ({ maxPadId, namePrefix, labelPrefix }: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         if (!G.boardState) return;
         const st = G.boardState as BoardState;
         const nowMs = Date.now();
@@ -690,6 +812,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:pad:update", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
@@ -737,6 +860,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // ADMIN: CLEAR ALL QUEUES (hard reset)
       // =========================
       socket.on("admin:clearAllQueues", () => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -756,13 +880,20 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // =========================
       // ADMIN: LOAD/RELOAD ROSTER
       // =========================
-      socket.on("admin:loadRoster", () => doLoadRoster());
-      socket.on("admin:reloadRoster", () => doLoadRoster());
+      socket.on("admin:loadRoster", () => {
+        if ((socket as any).data?.role !== "admin") return;
+        doLoadRoster();
+      });
+      socket.on("admin:reloadRoster", () => {
+        if ((socket as any).data?.role !== "admin") return;
+        doLoadRoster();
+      });
 
       // =========================
       // ADMIN: ADD PARTICIPANT (new)
       // =========================
       socket.on("admin:team:add", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -802,6 +933,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // =========================
 
       socket.on("admin:standby:move", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -829,6 +961,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:queue:setSlot", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -867,6 +1000,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:queue:demote", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -914,6 +1048,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:queue:swap", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -932,6 +1067,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:queue:updateTeam", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -942,8 +1078,8 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         if (!pad) return;
 
         const teamId = String(payload?.teamId ?? "").trim();
-        const patch = payload?.patch ?? {};
-        if (!teamId || !patch || typeof patch !== "object") return;
+        const patch = safePatch(payload?.patch, ["id", "name", "unit", "category", "division", "tag"]);
+        if (!teamId || !patch) return;
 
         const allIds = new Set<string>();
         if (pad.now?.id) allIds.add(pad.now.id);
@@ -967,7 +1103,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
           }
           if (patch.unit != null) t.unit = String(patch.unit).trim() || undefined;
           if (patch.category != null) t.category = String(patch.category).trim() || undefined;
-          if (patch.division === "Jr" || patch.division === "Sr") t.division = patch.division;
+          if (patch.division === "Jr" || patch.division === "Sr") t.division = patch.division as "Jr" | "Sr";
           if (patch.tag != null) t.tag = String(patch.tag);
         };
 
@@ -984,6 +1120,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:standby:remove", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
 
@@ -1015,6 +1152,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // JUDGE EVENTS (unchanged)
       // =========================
       socket.on("judge:complete", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1069,6 +1207,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:hold", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1087,6 +1226,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:dns", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1103,6 +1243,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:dq", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1119,6 +1260,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:undo", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1147,6 +1289,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:swap", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1163,6 +1306,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:skipOnDeck", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1195,6 +1339,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:startBreak", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1237,6 +1382,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:endBreak", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1271,6 +1417,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:addTeam", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1304,6 +1451,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:setPadLabel", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
@@ -1328,30 +1476,36 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // SCHEDULE CRUD (admin)
       // =========================
       socket.on("admin:schedule:setAll", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
-        const list = normalizeSchedule(payload?.schedule);
-        state.schedule = list;
+        const raw = Array.isArray(payload?.schedule) ? payload.schedule : [];
+        const list = raw
+          .map((item: unknown) => safePatch(item, ["id", "title", "type", "scope", "padIds", "startAt", "endAt", "notes", "affectedCategories", "createdAt", "updatedAt"]))
+          .filter((p): p is Record<string, unknown> => p != null && p.id && p.title != null && typeof p.startAt === "number" && typeof p.endAt === "number");
+        const normalized = normalizeSchedule(list as ScheduleEvent[]);
+        state.schedule = normalized;
         state.scheduleUpdatedAt = nowMs;
         state.updatedAt = nowMs;
 
-        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_SET_ALL", detail: `Schedule replaced (${list.length} blocks)` });
+        pushAudit({ ts: nowMs, padId: null, action: "SCHEDULE_SET_ALL", detail: `Schedule replaced (${normalized.length} blocks)` });
         emitState();
       });
 
       socket.on("admin:schedule:add", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
-        const e = payload?.event as Partial<ScheduleEvent> | undefined;
+        const e = safePatch(payload?.event, ["id", "title", "type", "scope", "padIds", "startAt", "endAt", "notes", "affectedCategories"]);
         if (!e) return;
 
         const event: ScheduleEvent = {
-          id: (e as any).id ? String((e as any).id) : uid(),
+          id: e.id ? String(e.id) : uid(),
           title: String(e.title ?? "Untitled"),
-          type: (e.type as any) ?? "OTHER",
-          scope: (e.scope as any) ?? "GLOBAL",
+          type: (e.type as ScheduleEvent["type"]) ?? "OTHER",
+          scope: (e.scope as ScheduleEvent["scope"]) ?? "GLOBAL",
           padIds: e.scope === "PAD" ? (Array.isArray(e.padIds) ? e.padIds.map((n) => Number(n)) : []) : undefined,
           startAt: Number(e.startAt ?? 0),
           endAt: Number(e.endAt ?? 0),
@@ -1370,11 +1524,12 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:schedule:update", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
         const id = String(payload?.id ?? "");
-        const patch = payload?.patch as Partial<ScheduleEvent> | undefined;
+        const patch = safePatch(payload?.patch, ["title", "type", "scope", "padIds", "startAt", "endAt", "notes", "affectedCategories"]);
         if (!id || !patch) return;
 
         const next = (state.schedule ?? []).map((e) => (e.id === id ? { ...e, ...patch, updatedAt: nowMs } : e));
@@ -1387,6 +1542,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:schedule:delete", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
@@ -1420,6 +1576,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:clearGlobalMessage", () => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
         state.globalMessage = null;
@@ -1453,6 +1610,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:startGlobalBreak", (payload: any) => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
@@ -1488,6 +1646,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("admin:endGlobalBreak", () => {
+        if ((socket as any).data?.role !== "admin") return;
         const state = G.boardState as BoardState;
         const nowMs = Date.now();
 
@@ -1506,3 +1665,5 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
   return res.status(200).json({ ok: true, rosterLoaded: !!G.rosterLoaded });
 }
+
+export { ensureGlobals, sanitizeStateAfterAnyLoad, pushAudit };
