@@ -18,6 +18,7 @@ export function useBoardSocket(): UseBoardSocket {
     return io({
       path: "/api/socket/io",
       transports: ["websocket"],
+      withCredentials: true, // send cookies for handshake auth
     });
   }, []);
 

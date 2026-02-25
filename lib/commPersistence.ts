@@ -1,6 +1,6 @@
 /**
  * Persist pad chat channels/messages to data/comm_state.json.
- * Load on server start. Debounce saves (max once per second).
+ * Load on server start. Throttled/coalesced writes (max once per second).
  * Does NOT persist online/offline presence.
  */
 
@@ -32,9 +32,25 @@ function getCommStatePath(): string {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let saveScheduled = false;
 
+/** Strict: urgent is true only if m.urgent === true or m.urgent === "true" (legacy). */
+function parseUrgent(m: { urgent?: unknown }): boolean {
+  const v = m.urgent;
+  if (v === true) return true;
+  if (v === "true") return true; // legacy
+  return false;
+}
+
+/** Parse pad key: only accept positive integers. Reject "1.9", "x", etc. */
+function parsePadKey(k: string): number | null {
+  const n = Number(k);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
 /**
  * Load persisted comm state. Returns Record<padId, messages>.
- * Keys in file are strings (JSON); we convert to number.
+ * Sanitizes: filters invalid ts (NaN/Infinity), invalid ackedAt → undefined, strict urgent.
+ * Pad keys must be positive integers (e.g. "1.9" rejected).
  */
 export function loadCommState(): Record<number, PersistedChatMessage[]> {
   const filePath = getCommStatePath();
@@ -61,26 +77,33 @@ export function loadCommState(): Record<number, PersistedChatMessage[]> {
 
   const result: Record<number, PersistedChatMessage[]> = {};
   for (const [k, v] of Object.entries(channels)) {
-    const padId = Math.floor(Number(k));
-    if (!Number.isFinite(padId) || padId < 1) continue;
+    const padId = parsePadKey(k);
+    if (padId == null) continue;
     if (!Array.isArray(v)) continue;
     const msgs = v
-      .filter((m): m is PersistedChatMessage => m && typeof m === "object" && typeof (m as any).id === "string" && typeof (m as any).ts === "number" && typeof (m as any).text === "string")
-      .map((m) => ({
-        id: String(m.id),
-        ts: Number(m.ts),
-        from: m.from === "JUDGE" ? "JUDGE" : "ADMIN",
-        text: String(m.text ?? ""),
-        urgent: Boolean(m.urgent),
-        ackedAt: m.ackedAt != null ? Number(m.ackedAt) : undefined,
-      }));
+      .filter((m): m is Record<string, unknown> => m != null && typeof m === "object" && typeof (m as any).id === "string" && typeof (m as any).text === "string")
+      .map((m) => {
+        const ts = Number((m as any).ts);
+        const ackedNum = (m as any).ackedAt;
+        const ackedAt = ackedNum != null ? Number(ackedNum) : undefined;
+        return {
+          id: String((m as any).id),
+          ts,
+          from: ((m as any).from === "JUDGE" ? "JUDGE" : "ADMIN") as "ADMIN" | "JUDGE",
+          text: String((m as any).text ?? ""),
+          urgent: parseUrgent(m as { urgent?: unknown }),
+          ackedAt: ackedAt != null && Number.isFinite(ackedAt) ? ackedAt : undefined,
+        };
+      })
+      .filter((m) => Number.isFinite(m.ts) && !Number.isNaN(m.ts) && m.ts !== Infinity && m.ts !== -Infinity) as PersistedChatMessage[];
     result[padId] = msgs;
   }
   return result;
 }
 
 /**
- * Schedule a debounced save. Writes at most once per DEBOUNCE_MS.
+ * Schedule a throttled/coalesced save. Writes at most once per DEBOUNCE_MS.
+ * Uses atomic write: write to .tmp then rename to final path.
  */
 export function scheduleCommSave(getChannels: () => Record<number, PersistedChatMessage[]>) {
   if (saveScheduled) return;
@@ -92,7 +115,8 @@ export function scheduleCommSave(getChannels: () => Record<number, PersistedChat
     saveTimer = null;
     try {
       const channels = getChannels();
-      const dir = path.dirname(getCommStatePath());
+      const filePath = getCommStatePath();
+      const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
       const toWrite: PersistedCommState = {
@@ -100,7 +124,9 @@ export function scheduleCommSave(getChannels: () => Record<number, PersistedChat
           Object.entries(channels).map(([k, v]) => [String(k), v])
         ),
       };
-      fs.writeFileSync(getCommStatePath(), JSON.stringify(toWrite, null, 2), "utf8");
+      const tmpPath = filePath + ".tmp";
+      fs.writeFileSync(tmpPath, JSON.stringify(toWrite, null, 2), "utf8");
+      fs.renameSync(tmpPath, filePath);
     } catch (e) {
       console.error("[comm] Persist error:", e);
     }

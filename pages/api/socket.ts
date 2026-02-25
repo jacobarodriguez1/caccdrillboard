@@ -149,10 +149,11 @@ function resolvePadId(payload: any): number | null {
   return Math.floor(n);
 }
 
-function getPadById(padId: number): Pad | null {
+function getPadById(padId: number | null | undefined): Pad | null {
+  if (padId == null || !Number.isFinite(padId)) return null;
   const s = G.boardState as BoardState | null;
   if (!s?.pads) return null;
-  return s.pads.find((p) => p.id === padId) ?? null;
+  return s.pads.find((p: Pad) => p.id === padId) ?? null;
 }
 
 function recomputeNextPadId(state: BoardState) {
@@ -449,7 +450,7 @@ function getCommSnapshot(): CommSnapshot {
   const channels = G.commChannels as Record<number, ChatMessage[]>;
   const padViewers = G.commPadViewers as Map<number, Set<string>>;
 
-  const result: PadChannel[] = pads.map((p) => {
+  const result: PadChannel[] = pads.map((p: Pad) => {
     const id = Number(p.id);
     const viewers = padViewers.get(id);
     const online = !!(viewers && viewers.size > 0);
@@ -605,8 +606,9 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         ensureGlobals();
         ensureChannelsForPads();
         const nowMs = Date.now();
-        const padId = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
-        if (!Number.isFinite(padId) || !getPadById(padId)) return;
+        const padIdRaw = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
+        if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
+        const padId = padIdRaw;
 
         const padViewers = G.commPadViewers as Map<number, Set<string>>;
         const prevPadId = (socket as any).data?.padId;
@@ -652,7 +654,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         const padId = payload?.padId != null ? Number(payload.padId) : null;
         const name = payload?.name != null ? String(payload.name).trim() : null;
         rec.lastSeenAt = nowMs;
-        if (Number.isFinite(padId)) rec.padId = Math.floor(padId);
+        if (typeof padId === "number" && Number.isFinite(padId)) rec.padId = Math.floor(padId);
         if (name) rec.name = name;
         G.commJudges.set(socket.id, rec);
         emitComm(io);
@@ -664,10 +666,11 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       socket.on("admin:comm:send", (payload: any) => {
         if ((socket as any).data?.role !== "admin") return;
         ensureGlobals();
-        const toPadId = payload?.toPadId != null ? Math.floor(Number(payload.toPadId)) : null;
+        const toPadIdRaw = payload?.toPadId != null ? Math.floor(Number(payload.toPadId)) : null;
         const text = String(payload?.text ?? "").trim();
-        if (!Number.isFinite(toPadId) || !text) return;
-        if (!getPadById(toPadId)) return;
+        if (typeof toPadIdRaw !== "number" || !Number.isFinite(toPadIdRaw) || !text) return;
+        if (!getPadById(toPadIdRaw)) return;
+        const toPadId = toPadIdRaw;
 
         const urgent = Boolean(payload?.urgent);
         const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text, urgent: urgent || undefined };
@@ -680,8 +683,9 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         ensureGlobals();
         const text = String(payload?.text ?? "").trim();
         if (!text) return;
-        const padId = (socket as any).data?.padId;
-        if (!Number.isFinite(padId) || !getPadById(padId)) return;
+        const padIdRaw = (socket as any).data?.padId;
+        if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
+        const padId = padIdRaw;
 
         const channels = G.commChannels as Record<number, ChatMessage[]>;
         const msgs = channels[padId] ?? [];
@@ -701,8 +705,9 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       socket.on("judge:comm:ack", (payload: any) => {
         if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
-        const padId = (socket as any).data?.padId;
-        if (!Number.isFinite(padId) || !getPadById(padId)) return;
+        const padIdRaw = (socket as any).data?.padId;
+        if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
+        const padId = padIdRaw;
 
         const messageId = String(payload?.messageId ?? "").trim();
         if (!messageId) return;
@@ -744,19 +749,25 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
         const channels = G.commChannels as Record<number, ChatMessage[]>;
         const pads = (G.boardState as BoardState)?.pads ?? [];
-        const padIds = target === "PAD" && Number.isFinite(padId) ? [padId] : pads.map((p) => Number(p.id)).filter(Number.isFinite);
+        const padIds: number[] =
+          target === "PAD" && typeof padId === "number" && Number.isFinite(padId)
+            ? [padId]
+            : pads.map((p: Pad) => Number(p.id)).filter((id): id is number => typeof id === "number" && Number.isFinite(id));
 
         const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text: `📣 BROADCAST: ${text}` };
         for (const pid of padIds) {
           const cur = channels[pid] ?? [];
-          cur.push(msg);
+          cur.push({ ...msg });
           if (cur.length > MAX_CHAT_PER_PAD) cur.splice(0, cur.length - MAX_CHAT_PER_PAD);
           channels[pid] = cur;
         }
         scheduleCommPersist();
 
         const padViewers = G.commPadViewers as Map<number, Set<string>>;
-        const recipients = target === "PAD" && Number.isFinite(padId) ? (padViewers.get(padId) ?? new Set()) : new Set(pads.flatMap((p) => [...(padViewers.get(Number(p.id)) ?? [])]));
+        const recipients =
+          target === "PAD" && typeof padId === "number" && Number.isFinite(padId)
+            ? (padViewers.get(padId) ?? new Set())
+            : new Set(pads.flatMap((p: Pad) => [...(padViewers.get(Number(p.id)) ?? [])]));
         for (const sid of recipients) {
           io.to(sid).emit("comm:broadcast", broadcast);
         }
@@ -791,7 +802,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         const st = G.boardState as BoardState;
         const nowMs = Date.now();
 
-        const existing = new Set((st.pads ?? []).map((p) => p.id));
+        const existing = new Set((st.pads ?? []).map((p: Pad) => p.id));
         const target = Math.max(0, Math.floor(Number(maxPadId) || 0));
         if (target <= 0) return;
 
@@ -1517,7 +1528,10 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         const raw = Array.isArray(payload?.schedule) ? payload.schedule : [];
         const list = raw
           .map((item: unknown) => safePatch(item, ["id", "title", "type", "scope", "padIds", "startAt", "endAt", "notes", "affectedCategories", "createdAt", "updatedAt"]))
-          .filter((p): p is Record<string, unknown> => p != null && p.id && p.title != null && typeof p.startAt === "number" && typeof p.endAt === "number");
+          .filter((p: unknown): p is Record<string, unknown> => {
+          const r = p as Record<string, unknown> | null;
+          return !!(r != null && r.id && r.title != null && typeof r.startAt === "number" && typeof r.endAt === "number");
+        });
         const normalized = normalizeSchedule(list as ScheduleEvent[]);
         state.schedule = normalized;
         state.scheduleUpdatedAt = nowMs;

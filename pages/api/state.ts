@@ -28,6 +28,7 @@ function loadStateIfNeeded() {
 
 export default function handler(req: NextApiRequest, res: NextApiResponse<BoardState>) {
   loadStateIfNeeded();
+  res.setHeader("Cache-Control", "no-store");
   return res.status(200).json(G.boardState as BoardState);
 }
 

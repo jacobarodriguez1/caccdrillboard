@@ -5,6 +5,13 @@ import { parse } from "csv-parse/sync";
 
 import type { BoardState, Pad, Team } from "./state";
 
+/** Roster path: env ROSTER_CSV_PATH or default data/drillTeamsRoster_2026.csv */
+export function getRosterPath(): string {
+  const envPath = process.env.ROSTER_CSV_PATH?.trim();
+  if (envPath) return path.isAbsolute(envPath) ? envPath : path.join(process.cwd(), envPath);
+  return path.join(process.cwd(), "data", "drillTeamsRoster_2026.csv");
+}
+
 type RosterRow = {
   teamId?: string;
   teamCode: string;
@@ -48,17 +55,27 @@ function assignPad(row: RosterRow): number {
   return 1;
 }
 
-export function buildStateFromRosterCsv(csvPath?: string): BoardState {
-  const filePath =
-    csvPath ?? path.join(process.cwd(), "data", "drillTeamsRoster_2026.csv");
+/** Build state from CSV. Returns null if file missing or unreadable. */
+export function buildStateFromRosterCsv(csvPath?: string): BoardState | null {
+  const filePath = csvPath ?? getRosterPath();
+  if (!fs.existsSync(filePath)) return null;
+  let csvText: string;
+  try {
+    csvText = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
 
-  const csvText = fs.readFileSync(filePath, "utf8");
-
-  const rows = parse(csvText, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
-  }) as RosterRow[];
+  let rows: RosterRow[];
+  try {
+    rows = parse(csvText, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    }) as RosterRow[];
+  } catch {
+    return null;
+  }
 
   const padLabels = [
     "Unarmed Platoon (Jr/Sr)", // Pad 1
@@ -113,5 +130,6 @@ export function buildStateFromRosterCsv(csvPath?: string): BoardState {
     };
   });
 
-  return { pads, updatedAt: now };
+  const nextPadId = (pads.length > 0 ? Math.max(...pads.map((p) => p.id)) : 0) + 1;
+  return { pads, updatedAt: now, nextPadId };
 }

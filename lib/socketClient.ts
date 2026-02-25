@@ -10,6 +10,7 @@ export function getSocket(): Socket | null {
     socket = io({
       path: "/api/socket/io",      // MUST match server
       transports: ["websocket"],   // avoid polling weirdness
+      withCredentials: true,      // send cookies for handshake auth
     });
   }
 
