@@ -6,7 +6,7 @@ import Link from "next/link";
 import type { BoardState, ScheduleEvent, ScheduleType, ScheduleScope, Pad, Team } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, buttonStyle, chipStyle } from "@/lib/ui";
-import { requireAdmin } from "@/lib/auth";
+import { requireAdminRole } from "@/lib/auth";
 
 const COLOR_ORANGE = "rgba(255,152,0,0.95)";
 const COLOR_YELLOW = "rgba(255,235,59,0.95)";
@@ -185,23 +185,27 @@ function pickFirstHeader(headers: string[], aliases: string[]): string | null {
 }
 
 /* =======================
-   COMM types (Admin ↔ Judge)
-   (Matches your server: judges array + chats keyed by socketId)
+   COMM types (pad-based channels)
    ======================= */
-type JudgePresence = {
-  socketId: string;
-  connectedAt: number;
-  lastSeenAt: number;
-  padId: number | null;
-  name?: string | null;
+type ChatFrom = "ADMIN" | "JUDGE";
+type ChatMessage = {
+  id: string;
+  ts: number;
+  from: ChatFrom;
+  text: string;
+  urgent?: boolean;
+  ackedAt?: number;
 };
 
-type ChatFrom = "ADMIN" | "JUDGE";
-type ChatMessage = { id: string; ts: number; from: ChatFrom; text: string };
+type PadChannel = {
+  padId: number;
+  name: string;
+  online: boolean;
+  messages: ChatMessage[];
+};
 
 type CommSnapshot = {
-  judges: JudgePresence[];
-  chats: Record<string, ChatMessage[]>;
+  channels: PadChannel[];
 };
 
 type CommBroadcastTarget = "ALL" | "PAD";
@@ -212,11 +216,6 @@ function formatHhmm(ts: number) {
   } catch {
     return "";
   }
-}
-
-function shortId(id: string) {
-  const s = String(id || "");
-  return s.length > 10 ? s.slice(-6) : s;
 }
 
 /* =======================
@@ -288,11 +287,12 @@ export default function AdminPage() {
   const [qmEditId, setQmEditId] = useState("");
 
   /* =======================
-     NEW: Admin comm state
+     Admin comm state (pad-based channels)
      ======================= */
   const [commSnap, setCommSnap] = useState<CommSnapshot | null>(null);
-  const [commSelectedJudgeId, setCommSelectedJudgeId] = useState<string>("");
+  const [commSelectedPadId, setCommSelectedPadId] = useState<number | null>(null);
   const [commDraft, setCommDraft] = useState("");
+  const [commUrgent, setCommUrgent] = useState(false);
   const [commBusy, setCommBusy] = useState(false);
   const [commErr, setCommErr] = useState<string | null>(null);
 
@@ -643,36 +643,33 @@ export default function AdminPage() {
   const qmSwap = (padId: number) => emit("admin:queue:swap", { padId });
 
   /* =======================
-     NEW: Comm derived + actions
+     Comm derived + actions (pad-based)
      ======================= */
-  const commJudges = useMemo(() => (commSnap?.judges ?? []).slice(), [commSnap?.judges]);
+  const commChannels = useMemo(() => (commSnap?.channels ?? []).slice(), [commSnap?.channels]);
 
   useEffect(() => {
-    if (!commSelectedJudgeId && commJudges.length > 0) setCommSelectedJudgeId(commJudges[0].socketId);
-    if (commSelectedJudgeId && commJudges.length > 0 && !commJudges.some((j) => j.socketId === commSelectedJudgeId)) {
-      setCommSelectedJudgeId(commJudges[0].socketId);
+    if (commSelectedPadId == null && commChannels.length > 0) setCommSelectedPadId(commChannels[0].padId);
+    if (commSelectedPadId != null && commChannels.length > 0 && !commChannels.some((c) => c.padId === commSelectedPadId)) {
+      setCommSelectedPadId(commChannels[0]?.padId ?? null);
     }
-  }, [commJudges, commSelectedJudgeId]);
+  }, [commChannels, commSelectedPadId]);
 
-  const selectedJudge = useMemo(
-    () => commJudges.find((j) => j.socketId === commSelectedJudgeId) ?? null,
-    [commJudges, commSelectedJudgeId]
+  const selectedChannel = useMemo(
+    () => commChannels.find((c) => c.padId === commSelectedPadId) ?? null,
+    [commChannels, commSelectedPadId]
   );
 
-  const selectedChat = useMemo(() => {
-    if (!commSelectedJudgeId) return [];
-    return (commSnap?.chats?.[commSelectedJudgeId] ?? []).slice();
-  }, [commSnap?.chats, commSelectedJudgeId]);
+  const selectedChat = useMemo(() => (selectedChannel?.messages ?? []).slice(), [selectedChannel?.messages]);
 
   const sendAdminChat = () => {
     setCommErr(null);
     const text = commDraft.trim();
     if (!text) return;
     if (!canAct) return setCommErr("Not connected (LIVE).");
-    if (!commSelectedJudgeId) return setCommErr("Select a judge channel first.");
+    if (commSelectedPadId == null) return setCommErr("Select a pad channel first.");
 
     setCommBusy(true);
-    emit("admin:comm:send", { toJudgeId: commSelectedJudgeId, text });
+    emit("admin:comm:send", { toPadId: commSelectedPadId, text, urgent: commUrgent });
     setCommDraft("");
     setTimeout(() => setCommBusy(false), 250);
   };
@@ -829,8 +826,8 @@ export default function AdminPage() {
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={{ fontWeight: 1000 }}>🗨️ Ops Chat / Broadcast (Judges)</div>
-            <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>Channels: {commJudges.length}</span>
+            <div style={{ fontWeight: 1000 }}>🗨️ Ops Chat / Broadcast (Pad Channels)</div>
+            <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>Channels: {commChannels.length}</span>
           </div>
 
           {commErr ? (
@@ -880,19 +877,17 @@ export default function AdminPage() {
           {/* Channel list + chat */}
           <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "340px 1fr", gap: 12 }}>
             <div style={{ borderRadius: 14, padding: 10, background: "rgba(0,0,0,0.18)", border: "1px solid rgba(255,255,255,0.10)", maxHeight: 320, overflow: "auto" }}>
-              {commJudges.length === 0 ? (
-                <div style={{ opacity: 0.75 }}>No judges registered yet.</div>
+              {commChannels.length === 0 ? (
+                <div style={{ opacity: 0.75 }}>No pad channels yet. Load roster or add pads.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {commJudges.map((j) => {
-                    const active = j.socketId === commSelectedJudgeId;
-                    const lastSeenSec = Math.max(0, Math.floor((nowMs - (j.lastSeenAt ?? nowMs)) / 1000));
-                    const label = j.name?.trim() || (j.padId != null ? `Pad ${j.padId} Judge` : `Judge ${shortId(j.socketId)}`);
+                  {commChannels.map((c) => {
+                    const active = c.padId === commSelectedPadId;
 
                     return (
                       <button
-                        key={j.socketId}
-                        onClick={() => setCommSelectedJudgeId(j.socketId)}
+                        key={c.padId}
+                        onClick={() => setCommSelectedPadId(c.padId)}
                         style={{
                           textAlign: "left",
                           padding: "10px 12px",
@@ -902,19 +897,15 @@ export default function AdminPage() {
                           color: "white",
                           cursor: "pointer",
                         }}
-                        title={j.socketId}
+                        title={c.name}
                       >
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-                          <div style={{ fontWeight: 950 }}>{label}</div>
-                          <div style={{ opacity: 0.7, fontSize: 12 }}>{j.padId != null ? `Pad ${j.padId}` : "—"}</div>
-                        </div>
-                        <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                          <span style={chipStyle("rgba(255,255,255,0.10)", "white")}>Chan {shortId(j.socketId)}</span>
-                          <span style={chipStyle(lastSeenSec <= 25 ? "rgba(46,125,50,0.85)" : "rgba(0,0,0,0.25)", "white")}>
-                            seen {lastSeenSec}s
+                          <div style={{ fontWeight: 950 }}>{c.name}</div>
+                          <span style={chipStyle(c.online ? "rgba(46,125,50,0.85)" : "rgba(0,0,0,0.25)", "white")}>
+                            {c.online ? "online" : "offline"}
                           </span>
-                          <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>{formatHhmm(j.connectedAt)}</span>
                         </div>
+                        <div style={{ marginTop: 4, opacity: 0.7, fontSize: 12 }}>{c.messages.length} messages</div>
                       </button>
                     );
                   })}
@@ -925,9 +916,8 @@ export default function AdminPage() {
             <div style={{ borderRadius: 14, padding: 10, background: "rgba(0,0,0,0.18)", border: "1px solid rgba(255,255,255,0.10)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
                 <div style={{ fontWeight: 950 }}>
-                  {selectedJudge ? `${selectedJudge.name?.trim() || "Judge"} • ${selectedJudge.padId != null ? `Pad ${selectedJudge.padId}` : "Pad —"}` : "Select a judge channel"}
+                  {selectedChannel ? `${selectedChannel.name} • ${selectedChannel.online ? "online" : "offline"}` : "Select a pad channel"}
                 </div>
-                <div style={{ opacity: 0.75, fontSize: 12 }}>{commSelectedJudgeId ? `Chan ${shortId(commSelectedJudgeId)}` : ""}</div>
               </div>
 
               <div style={{ marginTop: 10, height: 220, overflow: "auto", padding: 10, borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.25)" }}>
@@ -938,6 +928,11 @@ export default function AdminPage() {
                     <div key={m.id} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
                       <div style={{ width: 90, opacity: 0.7, fontSize: 12, paddingTop: 2 }}>
                         {m.from} • {formatHhmm(m.ts)}
+                        {m.urgent && (
+                          <div style={{ fontSize: 10, fontWeight: 900, color: m.ackedAt ? "rgba(46,125,50,0.9)" : "var(--danger)" }}>
+                            {m.ackedAt ? "Acknowledged" : "Urgent"}
+                          </div>
+                        )}
                       </div>
                       <div style={{ flex: 1, borderRadius: 10, padding: "8px 10px", border: "1px solid rgba(255,255,255,0.10)", background: m.from === "ADMIN" ? "rgba(255,152,0,0.10)" : "rgba(0,150,255,0.10)", whiteSpace: "pre-wrap" }}>
                         {m.text}
@@ -947,7 +942,11 @@ export default function AdminPage() {
                 )}
               </div>
 
-              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+              <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
+                  <input type="checkbox" checked={commUrgent} onChange={(e) => setCommUrgent(e.target.checked)} />
+                  Urgent
+                </label>
                 <input
                   value={commDraft}
                   onChange={(e) => setCommDraft(e.target.value)}
@@ -957,17 +956,17 @@ export default function AdminPage() {
                       sendAdminChat();
                     }
                   }}
-                  placeholder="Message selected judge… (Enter to send)"
+                  placeholder="Message pad channel… (Enter to send)"
                   style={flatInput}
-                  disabled={!canAct || !commSelectedJudgeId}
+                  disabled={!canAct || commSelectedPadId == null}
                 />
                 <button
                   onClick={sendAdminChat}
-                  disabled={!canAct || commBusy || !commDraft.trim() || !commSelectedJudgeId}
+                  disabled={!canAct || commBusy || !commDraft.trim() || commSelectedPadId == null}
                   style={buttonStyle({
-                    bg: !canAct || commBusy || !commDraft.trim() || !commSelectedJudgeId ? "rgba(0,0,0,0.25)" : "var(--cacc-gold)",
+                    bg: !canAct || commBusy || !commDraft.trim() || commSelectedPadId == null ? "rgba(0,0,0,0.25)" : "var(--cacc-gold)",
                     fg: "#111",
-                    disabled: !canAct || commBusy || !commDraft.trim() || !commSelectedJudgeId,
+                    disabled: !canAct || commBusy || !commDraft.trim() || commSelectedPadId == null,
                   })}
                 >
                   Send
@@ -1738,4 +1737,6 @@ function AreaRow({
   );
 }
 
-export const getServerSideProps = requireAdmin;
+export async function getServerSideProps(ctx: import("next").GetServerSidePropsContext) {
+  return requireAdminRole(ctx, "admin");
+}

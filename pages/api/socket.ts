@@ -42,6 +42,8 @@ type ChatMessage = {
   ts: number;
   from: ChatFrom;
   text: string;
+  urgent?: boolean;
+  ackedAt?: number;
 };
 
 type PadChannel = {
@@ -667,11 +669,12 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         if (!Number.isFinite(toPadId) || !text) return;
         if (!getPadById(toPadId)) return;
 
-        const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text };
+        const urgent = Boolean(payload?.urgent);
+        const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "ADMIN", text, urgent: urgent || undefined };
         appendChatToPad(io, toPadId, msg);
       });
 
-      // judge -> current pad channel
+      // judge -> current pad channel (reply auto-acks latest unacked urgent for that pad)
       socket.on("judge:comm:send", (payload: any) => {
         if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
@@ -680,8 +683,39 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         const padId = (socket as any).data?.padId;
         if (!Number.isFinite(padId) || !getPadById(padId)) return;
 
+        const channels = G.commChannels as Record<number, ChatMessage[]>;
+        const msgs = channels[padId] ?? [];
+        const lastUnackedUrgent = [...msgs].reverse().find((m) => m.urgent && m.ackedAt == null);
+        if (lastUnackedUrgent) {
+          lastUnackedUrgent.ackedAt = Date.now();
+          scheduleCommPersist();
+          emitComm(io);
+          for (const sid of G.commAdmins) io.to(sid).emit("comm:urgentAcked", { padId, messageId: lastUnackedUrgent.id });
+        }
+
         const msg: ChatMessage = { id: uid(), ts: Date.now(), from: "JUDGE", text };
         appendChatToPad(io, padId, msg);
+      });
+
+      // judge acknowledges urgent message (only for pad they are joined to)
+      socket.on("judge:comm:ack", (payload: any) => {
+        if ((socket as any).data?.role !== "judge") return;
+        ensureGlobals();
+        const padId = (socket as any).data?.padId;
+        if (!Number.isFinite(padId) || !getPadById(padId)) return;
+
+        const messageId = String(payload?.messageId ?? "").trim();
+        if (!messageId) return;
+
+        const channels = G.commChannels as Record<number, ChatMessage[]>;
+        const msgs = channels[padId] ?? [];
+        const msg = msgs.find((m) => m.id === messageId);
+        if (!msg || !msg.urgent || msg.ackedAt != null) return;
+
+        msg.ackedAt = Date.now();
+        scheduleCommPersist();
+        emitComm(io);
+        for (const sid of G.commAdmins) io.to(sid).emit("comm:urgentAcked", { padId, messageId });
       });
 
       // =========================

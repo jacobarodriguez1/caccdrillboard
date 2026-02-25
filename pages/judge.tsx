@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { BoardState, Pad, Division, ScheduleEvent, Team } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, buttonStyle, chipStyle, mmssFromSeconds } from "@/lib/ui";
-import { requireAdmin } from "@/lib/auth";
+import { requireAdminRole } from "@/lib/auth";
 
 const COLOR_ORANGE = "rgba(255,152,0,0.95)"; // BREAK
 const COLOR_YELLOW = "rgba(255,235,59,0.95)"; // REPORT
@@ -24,16 +24,21 @@ type AnySocket = {
 type CommMessage = {
   id: string;
   ts: number;
-  from: "admin" | "judge";
+  from: "ADMIN" | "JUDGE";
   text: string;
+  urgent?: boolean;
+  ackedAt?: number;
+};
+
+type PadChannel = {
+  padId: number;
+  name: string;
+  online: boolean;
+  messages: CommMessage[];
 };
 
 type CommSnapshot = {
-  judges: Record<
-    string,
-    { socketId: string; padId: number; connectedAt: number; lastSeenAt: number; name?: string }
-  >;
-  chats: Record<string, CommMessage[]>;
+  channels: PadChannel[];
   lastBroadcast?: { id: string; ts: number; text: string; ttlSeconds?: number } | null;
 };
 
@@ -263,8 +268,8 @@ export default function JudgeConsole() {
     socket.on?.("comm:snapshot", onSnap);
     socket.on?.("comm:broadcast", onBroadcast);
 
-    // Register this judge channel (server keys chats by socket.id)
-    socket.emit?.("comm:register", { role: "judge", padId: activePadId });
+    // Join pad channel (server keys chats by padId)
+    socket.emit?.("comm:joinPad", { padId: activePadId });
 
     return () => {
       socket.off?.("comm:snapshot", onSnap);
@@ -288,7 +293,22 @@ export default function JudgeConsole() {
     return () => clearInterval(t);
   }, [socket, activePadId]);
 
-  const myChat: CommMessage[] = commSnap?.chats?.[String(activePadId)] ?? [];
+  const myChat: CommMessage[] = commSnap?.channels?.find((c) => c.padId === activePadId)?.messages ?? [];
+  const lastUnackedUrgent = useMemo(
+    () => [...myChat].reverse().find((m) => m.urgent && m.ackedAt == null) ?? null,
+    [myChat]
+  );
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const lastUrgentIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const unacked = [...myChat].reverse().find((m) => m.urgent && m.ackedAt == null);
+    if (unacked && unacked.id !== lastUrgentIdRef.current) {
+      lastUrgentIdRef.current = unacked.id;
+      chatScrollRef.current?.querySelector(`[data-msg-id="${unacked.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    if (!unacked) lastUrgentIdRef.current = null;
+  }, [myChat]);
 
   function sendJudgeChat() {
     const text = commDraft.trim();
@@ -303,6 +323,11 @@ export default function JudgeConsole() {
 
     setCommDraft("");
     setTimeout(() => setCommSendBusy(false), 250);
+  }
+
+  function ackUrgent() {
+    if (!lastUnackedUrgent || !socket) return;
+    socket.emit?.("judge:comm:ack", { messageId: lastUnackedUrgent.id });
   }
 
   // schedule awareness (thin)
@@ -454,6 +479,7 @@ export default function JudgeConsole() {
           100% { box-shadow: 0 0 0 6px rgba(144, 202, 249, 0.18), 0 10px 26px rgba(0,0,0,0.30); }
         }
         @keyframes lateFlash { 0%{opacity:1} 50%{opacity:.55} 100%{opacity:1} }
+        @keyframes urgentFlash { 0%,100%{background:rgba(220,53,69,0.25)} 50%{background:rgba(220,53,69,0.45)} }
 
         .layout {
           display: grid;
@@ -830,6 +856,7 @@ export default function JudgeConsole() {
                 ) : null}
 
                 <div
+                  ref={chatScrollRef}
                   style={{
                     height: 180,
                     overflow: "auto",
@@ -844,18 +871,24 @@ export default function JudgeConsole() {
                     <div style={{ opacity: 0.7, fontSize: 13 }}>No messages yet.</div>
                   ) : (
                     myChat.slice(-80).map((m) => (
-                      <div key={m.id} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+                      <div key={m.id} data-msg-id={m.id} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
                         <div style={{ width: 70, opacity: 0.7, fontSize: 12, paddingTop: 2 }}>
-                          {m.from === "admin" ? "ADMIN" : "YOU"} • {formatHhmm(m.ts)}
+                          {m.from === "ADMIN" ? "ADMIN" : "YOU"} • {formatHhmm(m.ts)}
+                          {m.urgent && (
+                            <div style={{ fontSize: 10, fontWeight: 900, color: m.ackedAt ? "rgba(46,125,50,0.9)" : "var(--danger)" }}>
+                              {m.ackedAt ? "Acknowledged" : "⚠ Urgent"}
+                            </div>
+                          )}
                         </div>
                         <div
                           style={{
                             flex: 1,
                             borderRadius: 10,
                             padding: "8px 10px",
-                            border: "1px solid rgba(255,255,255,0.10)",
-                            background: m.from === "admin" ? "rgba(0, 150, 255, 0.10)" : "rgba(0, 200, 120, 0.10)",
+                            border: m.urgent && !m.ackedAt ? "2px solid var(--danger)" : "1px solid rgba(255,255,255,0.10)",
+                            background: m.from === "ADMIN" ? "rgba(0, 150, 255, 0.10)" : "rgba(0, 200, 120, 0.10)",
                             whiteSpace: "pre-wrap",
+                            animation: m.urgent && !m.ackedAt ? "urgentFlash 1.5s ease-in-out 3" : undefined,
                           }}
                         >
                           {m.text}
@@ -864,6 +897,18 @@ export default function JudgeConsole() {
                     ))
                   )}
                 </div>
+
+                {lastUnackedUrgent ? (
+                  <div style={{ marginBottom: 8 }}>
+                    <button
+                      onClick={ackUrgent}
+                      disabled={!canEmit}
+                      style={buttonStyle({ bg: "var(--danger)", fg: "white", disabled: !canEmit })}
+                    >
+                      Acknowledge
+                    </button>
+                  </div>
+                ) : null}
 
                 {commError ? (
                   <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 8 }}>{commError}</div>
@@ -1190,4 +1235,6 @@ export default function JudgeConsole() {
   );
 }
 
-export const getServerSideProps = requireAdmin;
+export async function getServerSideProps(ctx: import("next").GetServerSidePropsContext) {
+  return requireAdminRole(ctx, "judge");
+}
