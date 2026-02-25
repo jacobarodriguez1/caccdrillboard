@@ -1,0 +1,6 @@
+app = "caccdrillboard"
+primary_region = "lax"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
