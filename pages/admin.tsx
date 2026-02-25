@@ -30,7 +30,7 @@ type AnySocket = {
   connected?: boolean;
   on?: (event: string, cb: (...args: any[]) => void) => void;
   off?: (event: string, cb?: (...args: any[]) => void) => void;
-  emit?: (event: string, payload?: any) => void;
+  emit?: (event: string, payload?: any, callback?: (resp: any) => void) => void;
 };
 
 type AddWhere = "NOW" | "ONDECK" | "END";
@@ -297,6 +297,18 @@ export default function AdminPage() {
   // ✅ Clear All
   const [confirmClearAll, setConfirmClearAll] = useState(false);
 
+  // ✅ Start New Event (reset)
+  const [confirmStartNewEvent, setConfirmStartNewEvent] = useState(false);
+  const [resetScope, setResetScope] = useState({
+    clearComm: true,
+    clearAudit: true,
+    resetQueues: false,
+    resetHeaderLabel: false,
+  });
+  const [resetSuccessMsg, setResetSuccessMsg] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetErrorToast, setResetErrorToast] = useState<string | null>(null);
+
   // Add Participant modal (legacy quick-add)
   const [addModalPadId, setAddModalPadId] = useState<number | null>(null);
   const [addTeamName, setAddTeamName] = useState("");
@@ -351,11 +363,15 @@ export default function AdminPage() {
       } catch {}
     };
     const onDisconnect = () => setConnected(false);
+    const onConnectError = (err: Error) => {
+      console.error("[socket] connect_error:", err?.message ?? err);
+    };
     const onState = (next: BoardState) => setState(next);
     const onCommSnapshot = (snap: CommSnapshot) => setCommSnap(snap);
 
     s.on("connect", onConnect);
     s.on("disconnect", onDisconnect);
+    s.on("connect_error", onConnectError);
     s.on("state", onState);
     s.on("comm:snapshot", onCommSnapshot);
 
@@ -371,6 +387,7 @@ export default function AdminPage() {
     return () => {
       s.off?.("connect", onConnect);
       s.off?.("disconnect", onDisconnect);
+      s.off?.("connect_error", onConnectError);
       s.off?.("state", onState);
       s.off?.("comm:snapshot", onCommSnapshot);
       clearInterval(interval);
@@ -399,12 +416,60 @@ export default function AdminPage() {
   };
 
   // Header controls
-  const doReloadRoster = () => emit("admin:reloadRoster");
+  const [reloadRosterMsg, setReloadRosterMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const doReloadRoster = () => {
+    setReloadRosterMsg(null);
+    socket?.emit?.("admin:reloadRoster", (ack?: { ok?: boolean; error?: string; detail?: string }) => {
+      if (ack?.ok) {
+        setReloadRosterMsg({ ok: true, text: "Roster reloaded." });
+      } else {
+        setReloadRosterMsg({ ok: false, text: ack?.error ?? ack?.detail ?? "Reload failed." });
+      }
+      setTimeout(() => setReloadRosterMsg(null), 5000);
+    });
+  };
 
   // ✅ Clear All handler
   const doClearAll = () => {
     emit("admin:clearAllQueues");
     setConfirmClearAll(false);
+  };
+
+  // ✅ Start New Event handler
+  const doStartNewEvent = () => {
+    setResetError(null);
+    const payload = {
+      clearComm: resetScope.clearComm,
+      clearBroadcasts: resetScope.clearComm,
+      clearAudit: resetScope.clearAudit,
+      resetQueues: resetScope.resetQueues,
+      preservePads: true,
+      resetHeaderLabel: resetScope.resetHeaderLabel,
+    };
+    const errMsg = "No response from server. Check connection and try again.";
+    const ackTimeout = setTimeout(() => {
+      setConfirmStartNewEvent(false);
+      setResetError(null);
+      setResetErrorToast(errMsg);
+      setTimeout(() => setResetErrorToast(null), 8000);
+    }, 10000);
+    socket?.emit?.("admin:event:reset", payload, (ack?: { ok?: boolean; error?: string }) => {
+      clearTimeout(ackTimeout);
+      setConfirmStartNewEvent(false);
+      if (ack?.ok) {
+        setResetSuccessMsg("New event started. Ops Chat cleared.");
+        setTimeout(() => setResetSuccessMsg(null), 5000);
+      } else {
+        const err = ack?.error ?? "Reset failed (no response)";
+        setResetError(err);
+        setResetErrorToast(err);
+        console.error("[Start New Event]", err);
+        setTimeout(() => {
+          setResetError(null);
+          setResetErrorToast(null);
+        }, 8000);
+      }
+    });
   };
 
   // Global message
@@ -1046,8 +1111,72 @@ export default function AdminPage() {
             >
               Reload Roster
             </button>
+
+            <button
+              onClick={() => setConfirmStartNewEvent(true)}
+              disabled={!canAct}
+              title="Clear Ops Chat and optionally reset queues"
+              style={buttonStyle({
+                bg: "rgba(45, 55, 72, 0.95)",
+                fg: "white",
+                disabled: !canAct,
+              })}
+            >
+              Start New Event
+            </button>
           </div>
         </header>
+
+        {/* =======================
+            Start New Event success / error toast
+           ======================= */}
+        {resetSuccessMsg ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 12,
+              background: "rgba(76,175,80,0.2)",
+              border: "1px solid rgba(76,175,80,0.5)",
+              color: "#a5d6a7",
+            }}
+          >
+            ✅ {resetSuccessMsg}
+          </div>
+        ) : null}
+        {resetErrorToast ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 12,
+              background: "rgba(198,40,40,0.16)",
+              border: "1px solid rgba(198,40,40,0.5)",
+              color: "#f48fb1",
+            }}
+          >
+            <b>Start New Event failed:</b> {resetErrorToast}
+          </div>
+        ) : null}
+        {reloadRosterMsg ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 12,
+              background: reloadRosterMsg.ok
+                ? "rgba(76,175,80,0.2)"
+                : "rgba(198,40,40,0.16)",
+              border: reloadRosterMsg.ok
+                ? "1px solid rgba(76,175,80,0.5)"
+                : "1px solid rgba(198,40,40,0.5)",
+              color: reloadRosterMsg.ok ? "#a5d6a7" : "#f48fb1",
+            }}
+          >
+            {reloadRosterMsg.ok ? "✅ " : "❌ "}
+            {reloadRosterMsg.text}
+          </div>
+        ) : null}
 
         {/* =======================
             NEW: Ops Chat / Broadcast (Admin) — additive only
@@ -2330,6 +2459,173 @@ export default function AdminPage() {
                   })}
                 >
                   Clear Everything
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* =======================
+            Start New Event confirm modal
+           ======================= */}
+        {confirmStartNewEvent && (
+          <div
+            onClick={() => {
+              setConfirmStartNewEvent(false);
+              setResetError(null);
+            }}
+            style={modalBackdrop}
+          >
+            <div onClick={(e) => e.stopPropagation()} style={modalCard}>
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                Start New Event?
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  opacity: 0.85,
+                  fontSize: 13,
+                  lineHeight: 1.35,
+                }}
+              >
+                This will clear Ops Chat and (optionally) reset queues. This
+                cannot be undone.
+              </div>
+
+              {resetError ? (
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 10,
+                    borderRadius: 12,
+                    border: "1px solid rgba(198,40,40,0.6)",
+                    background: "rgba(198,40,40,0.16)",
+                    color: "#f48fb1",
+                    fontSize: 13,
+                  }}
+                >
+                  <b>Error:</b> {resetError}
+                </div>
+              ) : null}
+
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    cursor: "default",
+                    opacity: 0.8,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    disabled
+                    readOnly
+                  />
+                  Clear Ops Chat (always)
+                </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={resetScope.clearAudit}
+                    onChange={(e) =>
+                      setResetScope((s) => ({
+                        ...s,
+                        clearAudit: e.target.checked,
+                      }))
+                    }
+                  />
+                  Clear Audit Log
+                </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={resetScope.resetQueues}
+                    onChange={(e) =>
+                      setResetScope((s) => ({
+                        ...s,
+                        resetQueues: e.target.checked,
+                      }))
+                    }
+                  />
+                  Reset Queues
+                </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={resetScope.resetHeaderLabel}
+                    onChange={(e) =>
+                      setResetScope((s) => ({
+                        ...s,
+                        resetHeaderLabel: e.target.checked,
+                      }))
+                    }
+                  />
+                  Reset Event Header Label
+                </label>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 18,
+                  display: "flex",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={() => {
+                    setConfirmStartNewEvent(false);
+                    setResetError(null);
+                  }}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: false,
+                  })}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={doStartNewEvent}
+                  disabled={!canAct}
+                  style={buttonStyle({
+                    bg: "rgba(45, 55, 72, 0.95)",
+                    fg: "white",
+                    disabled: !canAct,
+                  })}
+                >
+                  Start New Event
                 </button>
               </div>
             </div>

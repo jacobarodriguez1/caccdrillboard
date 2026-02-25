@@ -6,6 +6,7 @@
 
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "./dataPath";
 
 export type PersistedChatMessage = {
   id: string;
@@ -26,15 +27,7 @@ const DEBOUNCE_MS = 1000;
 function getCommStatePath(): string {
   const envPath = process.env.COMM_STATE_PATH?.trim();
   if (envPath) return path.isAbsolute(envPath) ? envPath : path.join(process.cwd(), envPath);
-
-  // Fly: writable persistent volume is mounted at /data (via fly.toml [[mounts]])
-  // Local dev: use ./data under the repo root
-  const baseDir =
-    process.env.NODE_ENV === "production"
-      ? "/data"
-      : path.join(process.cwd(), "data");
-
-  return path.join(baseDir, COMM_STATE_FILENAME);
+  return path.join(getDataDir(), COMM_STATE_FILENAME);
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;

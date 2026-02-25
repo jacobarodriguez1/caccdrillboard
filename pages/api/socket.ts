@@ -6,7 +6,7 @@ import { Server as IOServer } from "socket.io";
 
 import type { BoardState, Pad, Team, PadStatus, ScheduleEvent, CycleStats } from "@/lib/state";
 import { createInitialState, createPad } from "@/lib/state";
-import { buildStateFromRosterCsv } from "@/lib/roster";
+import { buildStateFromRosterCsv, getRosterPath } from "@/lib/roster";
 import { parseCookie } from "@/lib/ui";
 import { verifyRoleCookie } from "@/lib/auth";
 import { loadCommState, scheduleCommSave } from "@/lib/commPersistence";
@@ -552,12 +552,19 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         socket.emit("audit", G.audit);
       });
 
-      const doLoadRoster = () => {
+      type ReloadAck = (arg: { ok: boolean; error?: string; detail?: string }) => void;
+      const doLoadRoster = (ack?: ReloadAck) => {
         const nowMs = Date.now();
         const prev = G.boardState as BoardState;
+        const sendAck = (ok: boolean, error?: string, detail?: string) => {
+          try {
+            ack?.({ ok, error, detail });
+          } catch {}
+        };
 
         try {
-          const built = buildStateFromRosterCsv();
+          const rosterPath = getRosterPath();
+          const built = buildStateFromRosterCsv(rosterPath);
 
           if (built) {
             built.globalBreakStartAt = prev.globalBreakStartAt ?? null;
@@ -577,14 +584,19 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
             sanitizeStateAfterAnyLoad(G.boardState as BoardState);
             pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD", detail: "Roster loaded from CSV." });
             emitState();
+            sendAck(true);
             return;
           }
 
-          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_FAIL", detail: "Roster load returned null; no changes." });
+          const detail = `No roster at ${rosterPath}; using empty state.`;
+          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_FAIL", detail });
           emitState();
+          sendAck(false, "Roster file not found", detail);
         } catch (e: any) {
-          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_ERROR", detail: `Roster load error: ${String(e?.message ?? e)}` });
+          const err = String(e?.message ?? e);
+          pushAudit({ ts: nowMs, padId: null, action: "ROSTER_LOAD_ERROR", detail: `Roster load error: ${err}` });
           emitState();
+          sendAck(false, err);
         }
       };
 
@@ -829,6 +841,124 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       // =========================
+      // ADMIN: EVENT RESET (Start New Event)
+      // =========================
+      type ResetScope = {
+        clearComm?: boolean;
+        clearBroadcasts?: boolean;
+        clearAudit?: boolean;
+        resetQueues?: boolean;
+        preservePads?: boolean;
+        resetHeaderLabel?: boolean;
+      };
+      type ResetAck = (arg: { ok: boolean; error?: string }) => void;
+      socket.on("admin:event:reset", (payload: ResetScope | undefined, ack?: ResetAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          console.warn("[admin:event:reset] Rejected: not admin");
+          sendAck(false, "Not authorized");
+          return;
+        }
+        if (!G.boardState) {
+          console.warn("[admin:event:reset] Rejected: no board state");
+          sendAck(false, "No board state");
+          return;
+        }
+
+        try {
+          ensureGlobals();
+          ensureChannelsForPads();
+
+          const scope: Required<ResetScope> = {
+            clearComm: payload?.clearComm !== false,
+            clearBroadcasts: payload?.clearBroadcasts !== false,
+            clearAudit: payload?.clearAudit !== false,
+            resetQueues: payload?.resetQueues === true,
+            preservePads: payload?.preservePads !== false,
+            resetHeaderLabel: payload?.resetHeaderLabel === true,
+          };
+
+          const nowMs = Date.now();
+        const st = G.boardState as BoardState;
+        const channels = G.commChannels as Record<number, ChatMessage[]>;
+
+        // A) clearComm (default true)
+        if (scope.clearComm) {
+          G.commChannels = {} as Record<number, ChatMessage[]>;
+          G.commPadViewers = new Map<number, Set<string>>();
+          scheduleCommPersist();
+        } else if (scope.clearBroadcasts) {
+          // Filter broadcast messages from channels
+          for (const [k, msgs] of Object.entries(channels)) {
+            const id = Number(k);
+            if (!Number.isFinite(id)) continue;
+            const filtered = (msgs ?? []).filter((m) => !m.text?.startsWith?.("📣 BROADCAST:"));
+            if (filtered.length === 0) delete channels[id];
+            else channels[id] = filtered;
+          }
+          scheduleCommPersist();
+        }
+
+        // B) clearAudit (default true)
+        if (scope.clearAudit) {
+          G.audit = [];
+          if (G.boardState) (G.boardState as any).audit = G.audit;
+        }
+
+        // C) resetQueues (default false)
+        if (scope.resetQueues && st.pads) {
+          for (const pad of st.pads) {
+            pad.now = null;
+            pad.onDeck = null;
+            pad.standby = [];
+            pad.note = "";
+            pad.status = "IDLE";
+            pad.nowArrivedAt = null;
+            pad.nowArrivedTeamId = null;
+            pad.runStartedAt = null;
+            pad.lastRunEndedAt = null;
+            pad.lastCompleteAt = null;
+            pad.reportByDeadlineAt = null;
+            pad.reportByTeamId = null;
+            pad.breakUntilAt = null;
+            pad.breakReason = null;
+            pad.breakStartAt = null;
+            pad.message = null;
+            pad.messageUntilAt = null;
+            pad.updatedAt = nowMs;
+          }
+          st.updatedAt = nowMs;
+        }
+
+        // D) resetHeaderLabel (default false)
+        if (scope.resetHeaderLabel) {
+          st.eventHeaderLabel = "COMPETITION MATRIX";
+        }
+
+        // Add audit entry for the reset (after clearing audit if applicable)
+        pushAudit({
+          ts: nowMs,
+          padId: null,
+          action: "EVENT_RESET",
+          detail: JSON.stringify(scope),
+        });
+
+        emitState();
+        emitComm(io);
+        console.log("[admin:event:reset] OK scope=", JSON.stringify(scope));
+        sendAck(true);
+        } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          console.error("[admin:event:reset] Error:", e);
+          sendAck(false, err);
+        }
+      });
+
+      // =========================
       // ADMIN: AREA CRUD
       // =========================
       socket.on("admin:pad:add", (payload: any) => {
@@ -925,13 +1055,19 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // =========================
       // ADMIN: LOAD/RELOAD ROSTER
       // =========================
-      socket.on("admin:loadRoster", () => {
-        if ((socket as any).data?.role !== "admin") return;
-        doLoadRoster();
+      socket.on("admin:loadRoster", (ack?: ReloadAck) => {
+        if ((socket as any).data?.role !== "admin") {
+          ack?.({ ok: false, error: "Not authorized" });
+          return;
+        }
+        doLoadRoster(ack);
       });
-      socket.on("admin:reloadRoster", () => {
-        if ((socket as any).data?.role !== "admin") return;
-        doLoadRoster();
+      socket.on("admin:reloadRoster", (ack?: ReloadAck) => {
+        if ((socket as any).data?.role !== "admin") {
+          ack?.({ ok: false, error: "Not authorized" });
+          return;
+        }
+        doLoadRoster(ack);
       });
 
       // =========================

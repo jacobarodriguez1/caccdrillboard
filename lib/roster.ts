@@ -4,12 +4,26 @@ import path from "path";
 import { parse } from "csv-parse/sync";
 
 import type { BoardState, Pad, Team } from "./state";
+import { getDataDir } from "./dataPath";
 
-/** Roster path: env ROSTER_CSV_PATH or default data/drillTeamsRoster_2026.csv */
+const ROSTER_FILENAME = "drillTeamsRoster_2026.csv";
+
+/** Roster path: env ROSTER_CSV_PATH or default. Production: /data first, then /app/data (baked-in). */
 export function getRosterPath(): string {
   const envPath = process.env.ROSTER_CSV_PATH?.trim();
   if (envPath) return path.isAbsolute(envPath) ? envPath : path.join(process.cwd(), envPath);
-  return path.join(process.cwd(), "data", "drillTeamsRoster_2026.csv");
+
+  const dataDir = getDataDir();
+  const primaryPath = path.join(dataDir, ROSTER_FILENAME);
+  if (fs.existsSync(primaryPath)) return primaryPath;
+
+  // Production fallback: baked-in default at /app/data (Dockerfile COPY)
+  if (process.env.NODE_ENV === "production") {
+    const fallbackPath = path.join("/app", "data", ROSTER_FILENAME);
+    if (fs.existsSync(fallbackPath)) return fallbackPath;
+  }
+
+  return primaryPath;
 }
 
 type RosterRow = {
