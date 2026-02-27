@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { BoardState, Pad, Team, ScheduleEvent } from "@/lib/state";
+import { getCompetitionNowMs } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, mmssFromSeconds, chipStyle } from "@/lib/ui";
 import {
@@ -205,6 +206,7 @@ function getPadBanner(
   p: Pad,
   nowMs: number,
   globalBreakActive: boolean,
+  isLive = true,
 ): Banner {
   if (globalBreakActive) return null;
 
@@ -221,7 +223,7 @@ function getPadBanner(
     };
   }
 
-  if (p.breakUntilAt && p.breakUntilAt > nowMs) {
+  if (isLive && p.breakUntilAt && p.breakUntilAt > nowMs) {
     return {
       kind: "BREAK_ACTIVE",
       title: `BREAK: ${(p.breakReason ?? "Break").trim()}`,
@@ -230,7 +232,7 @@ function getPadBanner(
     };
   }
 
-  if (isArrivedForNow(p) && p.nowArrivedAt) {
+  if (isLive && isArrivedForNow(p) && p.nowArrivedAt) {
     return {
       kind: "ONPAD",
       title: `ON PAD: ${p.now?.name ?? "—"}`,
@@ -240,6 +242,7 @@ function getPadBanner(
   }
 
   const validReport =
+    isLive &&
     !!p.reportByDeadlineAt &&
     !!p.reportByTeamId &&
     !!p.now?.id &&
@@ -385,6 +388,9 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
 
   const pads = useMemo(() => state?.pads ?? [], [state]);
   const nowMs = Date.now();
+  const compNowMs = getCompetitionNowMs(state ?? null, nowMs);
+  const effectiveNow = compNowMs ?? nowMs;
+  const isLive = (state as any)?.eventStatus === "LIVE";
 
   const schedule = useMemo(
     () => sortSchedule(state?.schedule ?? []),
@@ -435,7 +441,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
       banners.push({
         kind: "GLOBAL_BREAK_ACTIVE",
         title: `GLOBAL BREAK: ${gbReason}`,
-        rightText: mmssFromSeconds((gbUntil - nowMs) / 1000),
+        rightText: mmssFromSeconds((gbUntil - effectiveNow) / 1000),
         sub: `Resumes at ${fmtTime(gbUntil)}`,
       });
     }
@@ -461,6 +467,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
     gbStart,
     gbUntil,
     gbReason,
+    effectiveNow,
     nowMs,
     state?.globalMessage,
     state?.globalMessageUntilAt,
@@ -486,7 +493,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
     if (globalBreakActive) return;
 
     for (const p of pads) {
-      const b = getPadBanner(p, nowMs, globalBreakActive);
+      const b = getPadBanner(p, effectiveNow, globalBreakActive, isLive);
       const isLate = b?.kind === "REPORT" && !!b.late;
       const wasLate = !!prevLateByPad.current[p.id];
 
@@ -499,7 +506,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
       }
       prevLateByPad.current[p.id] = isLate;
     }
-  }, [pads, nowMs, kiosk, globalBreakActive]);
+  }, [pads, effectiveNow, kiosk, globalBreakActive, isLive]);
 
   return (
     <div
@@ -757,9 +764,34 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
           gap: 14,
         }}
       >
-        {filteredPads.map((p) => {
-          const banner = getPadBanner(p, nowMs, globalBreakActive);
-          const status = deriveStatus(p, banner, nowMs, globalBreakActive);
+        {pads.length === 0 ? (
+          <div
+            style={{
+              gridColumn: "1 / -1",
+              padding: 24,
+              textAlign: "center",
+              opacity: 0.75,
+              fontSize: 15,
+            }}
+          >
+            No areas yet.
+          </div>
+        ) : filteredPads.length === 0 ? (
+          <div
+            style={{
+              gridColumn: "1 / -1",
+              padding: 24,
+              textAlign: "center",
+              opacity: 0.75,
+              fontSize: 15,
+            }}
+          >
+            No matches for "{search}".
+          </div>
+        ) : (
+        filteredPads.map((p) => {
+          const banner = getPadBanner(p, effectiveNow, globalBreakActive, isLive);
+          const status = deriveStatus(p, banner, effectiveNow, globalBreakActive);
           const { bg, fg } = statusColors(status);
 
           const nowAccent = nowAccentForStatus(status);
@@ -863,10 +895,11 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
               </PadStandbySection>
             </PadContainer>
           );
-        })}
+        })
+        )}
       </div>
 
-      {filteredPads.length === 0 ? (
+      {filteredPads.length === 0 && pads.length > 0 ? (
         <div style={{ marginTop: 16, color: "var(--text-tertiary)" }}>
           No matches for “{search}”.
         </div>

@@ -11,6 +11,7 @@ import type {
   Pad,
   Team,
 } from "@/lib/state";
+import { getCompetitionNowMs } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, buttonStyle, chipStyle } from "@/lib/ui";
 import { requireAdminRole } from "@/lib/auth";
@@ -19,6 +20,7 @@ import {
   PadOnDeckSection,
   PadStandbySection,
 } from "@/components/PadLayout";
+import { DateTimeField } from "@/components/DateTimeField";
 
 const COLOR_ORANGE = "rgba(255,152,0,0.95)";
 const COLOR_YELLOW = "rgba(255,235,59,0.95)";
@@ -296,6 +298,11 @@ export default function AdminPage() {
 
   // ✅ Clear All
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [clearAllSuccessMsg, setClearAllSuccessMsg] = useState<string | null>(null);
+
+  // Event Start Gate
+  const [eventStatusMsg, setEventStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [confirmStartNow, setConfirmStartNow] = useState(false);
 
   // ✅ Start New Event (reset)
   const [confirmStartNewEvent, setConfirmStartNewEvent] = useState(false);
@@ -304,6 +311,7 @@ export default function AdminPage() {
     clearAudit: true,
     resetQueues: false,
     resetHeaderLabel: false,
+    clearAreas: false,
   });
   const [resetSuccessMsg, setResetSuccessMsg] = useState<string | null>(null);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -348,6 +356,25 @@ export default function AdminPage() {
   const [bcTarget, setBcTarget] = useState<CommBroadcastTarget>("ALL");
   const [bcPadId, setBcPadId] = useState("1");
   const [bcTtl, setBcTtl] = useState<number>(120);
+
+  /* Unread message awareness (client-side only) */
+  const [lastReadTsByPad, setLastReadTsByPad] = useState<Record<number, number>>(
+    () => ({}),
+  );
+  const [lastJudgeMsgTsByPad, setLastJudgeMsgTsByPad] = useState<
+    Record<number, number>
+  >(() => ({}));
+  const [toast, setToast] = useState<{
+    open: boolean;
+    text: string;
+    kind: "info" | "urgent";
+    padId?: number;
+  }>({ open: false, text: "", kind: "info" });
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [commListTab, setCommListTab] = useState<"inbox" | "pads">("inbox");
+  const [inboxFilter, setInboxFilter] = useState<"unread" | "recent">("unread");
+  const chatViewportRef = useRef<HTMLDivElement | null>(null);
+  const msgElByIdRef = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
     fetch("/api/socket");
@@ -396,6 +423,8 @@ export default function AdminPage() {
 
   const canAct = !!socket?.emit && connected;
   const nowMs = Date.now();
+  const compNowMs = getCompetitionNowMs(state ?? null, nowMs);
+  const effectiveNow = compNowMs ?? nowMs;
 
   function emit(event: string, payload?: any) {
     if (!canAct) return;
@@ -429,10 +458,19 @@ export default function AdminPage() {
     });
   };
 
-  // ✅ Clear All handler
+  // ✅ Clear All handler (deletes ALL areas + clears queues)
   const doClearAll = () => {
-    emit("admin:clearAllQueues");
     setConfirmClearAll(false);
+    socket?.emit?.(
+      "admin:clearAllQueues",
+      { clearAreas: true },
+      (ack?: { ok?: boolean; error?: string }) => {
+        if (ack?.ok) {
+          setClearAllSuccessMsg("All areas cleared.");
+          setTimeout(() => setClearAllSuccessMsg(null), 5000);
+        }
+      },
+    );
   };
 
   // ✅ Start New Event handler
@@ -445,6 +483,7 @@ export default function AdminPage() {
       resetQueues: resetScope.resetQueues,
       preservePads: true,
       resetHeaderLabel: resetScope.resetHeaderLabel,
+      clearAreas: resetScope.clearAreas,
     };
     const errMsg = "No response from server. Check connection and try again.";
     const ackTimeout = setTimeout(() => {
@@ -560,9 +599,9 @@ export default function AdminPage() {
     return pads.map((p) => ({
       id: p.id,
       label: p.label,
-      status: padOpsStatus(p, nowMs),
+      status: padOpsStatus(p, effectiveNow),
     }));
-  }, [state?.pads, nowMs]);
+  }, [state?.pads, effectiveNow]);
 
   // Areas
   const areas = useMemo(
@@ -781,7 +820,7 @@ export default function AdminPage() {
 
   const globalBreakRemaining =
     globalBreakActive && state?.globalBreakUntilAt
-      ? (state.globalBreakUntilAt - nowMs) / 1000
+      ? (state.globalBreakUntilAt - effectiveNow) / 1000
       : null;
 
   // ✅ Queue Manager derived
@@ -862,13 +901,12 @@ export default function AdminPage() {
   );
 
   useEffect(() => {
-    if (commSelectedPadId == null && commChannels.length > 0)
-      setCommSelectedPadId(commChannels[0].padId);
-    if (
-      commSelectedPadId != null &&
-      commChannels.length > 0 &&
-      !commChannels.some((c) => c.padId === commSelectedPadId)
-    ) {
+    if (commChannels.length === 0) {
+      setCommSelectedPadId(null);
+      return;
+    }
+    if (commSelectedPadId == null) setCommSelectedPadId(commChannels[0].padId);
+    else if (!commChannels.some((c) => c.padId === commSelectedPadId)) {
       setCommSelectedPadId(commChannels[0]?.padId ?? null);
     }
   }, [commChannels, commSelectedPadId]);
@@ -881,6 +919,168 @@ export default function AdminPage() {
   const selectedChat = useMemo(
     () => (selectedChannel?.messages ?? []).slice(),
     [selectedChannel?.messages],
+  );
+
+  /* Unread counts + per-pad metadata for list rendering */
+  const {
+    unreadCountByPad,
+    hasUrgentUnreadByPad,
+    totalUnread,
+    lastMsgTsByPad,
+    lastSnippetByPad,
+    lastUnreadJudgeTsByPad,
+    renderChannels,
+  } = useMemo(() => {
+    const unread: Record<number, number> = {};
+    const urgent: Record<number, boolean> = {};
+    const lastTs: Record<number, number> = {};
+    const snippet: Record<number, string> = {};
+    const lastUnreadTs: Record<number, number> = {};
+    let total = 0;
+
+    for (const c of commChannels) {
+      const lastRead = lastReadTsByPad[c.padId] ?? 0;
+      let count = 0;
+      let hasUrgent = false;
+      let latestTs = 0;
+      let latestSnippet = "";
+      let maxUnreadJudgeTs = 0;
+
+      for (const m of c.messages) {
+        if (m.ts > latestTs) {
+          latestTs = m.ts;
+          latestSnippet = m.text.slice(0, 60).replace(/\n/g, " ") || "(no text)";
+        }
+        if (m.from !== "JUDGE") continue;
+        if (m.ts > lastRead) {
+          count++;
+          if (m.urgent && !m.ackedAt) hasUrgent = true;
+          if (m.ts > maxUnreadJudgeTs) maxUnreadJudgeTs = m.ts;
+        }
+      }
+
+      unread[c.padId] = count;
+      urgent[c.padId] = hasUrgent;
+      lastTs[c.padId] = latestTs;
+      snippet[c.padId] = latestSnippet;
+      lastUnreadTs[c.padId] = maxUnreadJudgeTs;
+      total += count;
+    }
+
+    let channels: PadChannel[];
+    if (commListTab === "pads") {
+      channels = [...commChannels].sort((a, b) => a.padId - b.padId);
+    } else {
+      if (inboxFilter === "unread") {
+        channels = commChannels
+          .filter((c) => (unread[c.padId] ?? 0) > 0)
+          .sort(
+            (a, b) =>
+              (lastUnreadTs[b.padId] ?? 0) - (lastUnreadTs[a.padId] ?? 0),
+          );
+      } else {
+        channels = commChannels
+          .filter((c) => (lastTs[c.padId] ?? 0) > 0)
+          .sort((a, b) => (lastTs[b.padId] ?? 0) - (lastTs[a.padId] ?? 0));
+      }
+    }
+
+    return {
+      unreadCountByPad: unread,
+      hasUrgentUnreadByPad: urgent,
+      totalUnread: total,
+      lastMsgTsByPad: lastTs,
+      lastSnippetByPad: snippet,
+      lastUnreadJudgeTsByPad: lastUnreadTs,
+      renderChannels: channels,
+    };
+  }, [
+    commChannels,
+    lastReadTsByPad,
+    commListTab,
+    inboxFilter,
+  ]);
+
+  const hasSeenInitialCommRef = useRef(false);
+  /* Incoming judge message detection: show toast, update lastJudgeMsgTsByPad */
+  useEffect(() => {
+    if (!commChannels.length) return;
+    for (const c of commChannels) {
+      const judgeMsgs = c.messages.filter((m) => m.from === "JUDGE");
+      if (judgeMsgs.length === 0) continue;
+      const latest = judgeMsgs.reduce((a, b) => (b.ts > a.ts ? b : a), judgeMsgs[0]);
+      const prev = lastJudgeMsgTsByPad[c.padId] ?? 0;
+      if (latest.ts > prev) {
+        setLastJudgeMsgTsByPad((p) => ({ ...p, [c.padId]: latest.ts }));
+        if (!hasSeenInitialCommRef.current) {
+          hasSeenInitialCommRef.current = true;
+          continue;
+        }
+        const isUrgent = !!latest.urgent && !latest.ackedAt;
+        setToast({
+          open: true,
+          text: isUrgent
+            ? `Urgent message from ${c.name}`
+            : `New message from ${c.name}`,
+          kind: isUrgent ? "urgent" : "info",
+          padId: c.padId,
+        });
+        if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+        toastTimeoutRef.current = setTimeout(() => {
+          setToast((t) => ({ ...t, open: false }));
+          toastTimeoutRef.current = null;
+        }, 4000);
+      }
+    }
+    if (commChannels.length > 0) hasSeenInitialCommRef.current = true;
+  }, [commSnap?.channels]);
+
+  /* IntersectionObserver: mark judge messages READ when >=60% visible */
+  useEffect(() => {
+    const padId = commSelectedPadId;
+    if (padId == null) return;
+    const viewport = chatViewportRef.current;
+    if (!viewport) return;
+    const chat = selectedChat.filter((m) => m.from === "JUDGE");
+    if (chat.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const el = entry.target as HTMLElement;
+          const mts = Number(el.getAttribute("data-mts"));
+          const pid = Number(el.getAttribute("data-padid"));
+          if (!Number.isFinite(mts) || !Number.isFinite(pid)) continue;
+          setLastReadTsByPad((prev) => {
+            const cur = prev[pid] ?? 0;
+            if (mts <= cur) return prev;
+            return { ...prev, [pid]: Math.max(cur, mts) };
+          });
+        }
+      },
+      { root: viewport, threshold: 0.6 },
+    );
+
+    const raf = requestAnimationFrame(() => {
+      for (const m of chat) {
+        const el = msgElByIdRef.current[m.id];
+        if (el) observer.observe(el);
+      }
+    });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [commSelectedPadId, selectedChat]);
+
+  /* Toast cleanup on unmount */
+  useEffect(
+    () => () => {
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    },
+    [],
   );
 
   const sendAdminChat = () => {
@@ -931,6 +1131,51 @@ export default function AdminPage() {
       <Head>
         <title>Competition Matrix — Admin</title>
       </Head>
+
+      {toast.open ? (
+        <div
+          style={{
+            position: "fixed",
+            top: 16,
+            right: 16,
+            zIndex: 200,
+            padding: "12px 16px",
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.2)",
+            background:
+              toast.kind === "urgent"
+                ? "rgba(198,40,40,0.95)"
+                : "rgba(33,150,243,0.95)",
+            color: "white",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>{toast.text}</span>
+          {toast.padId != null ? (
+            <button
+              onClick={() => {
+                setCommSelectedPadId(toast.padId!);
+                setToast((t) => ({ ...t, open: false }));
+                if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+              }}
+              style={{
+                padding: "6px 12px",
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.5)",
+                background: "rgba(255,255,255,0.2)",
+                color: "white",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              View
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <main
         className="responsive-page"
@@ -1066,6 +1311,133 @@ export default function AdminPage() {
                   Set
                 </button>
               </div>
+
+              {/* Event Status (compact) */}
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>
+                  EVENT STATUS
+                </span>
+                <span
+                  style={chipStyle(
+                    (state as any)?.eventStatus === "LIVE"
+                      ? "rgba(46,125,50,0.85)"
+                      : "rgba(255,152,0,0.75)",
+                    "white",
+                  )}
+                >
+                  {(state as any)?.eventStatus === "LIVE" ? "LIVE" : "PLANNING"}
+                </span>
+                {(state as any)?.eventStatus === "PLANNING" ? (
+                  <button
+                    disabled={!canAct}
+                    onClick={() => setConfirmStartNow(true)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "4px 10px",
+                      height: 28,
+                      borderRadius: 6,
+                      background: "rgba(46,125,50,0.75)",
+                      color: "white",
+                      fontWeight: 700,
+                      fontSize: 12,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      cursor: canAct ? "pointer" : "not-allowed",
+                      opacity: canAct ? 1 : 0.5,
+                    }}
+                  >
+                    Start Now
+                  </button>
+                ) : (state as any)?.eventPaused ? (
+                  <button
+                    disabled={!canAct}
+                    onClick={() => {
+                      setEventStatusMsg(null);
+                      socket?.emit?.("admin:event:resume", {}, (ack?: { ok?: boolean; error?: string }) => {
+                        if (ack?.ok) {
+                          setEventStatusMsg({ ok: true, text: "Competition resumed." });
+                        } else {
+                          setEventStatusMsg({ ok: false, text: ack?.error ?? "Failed." });
+                        }
+                        setTimeout(() => setEventStatusMsg(null), 4000);
+                      });
+                    }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "4px 10px",
+                      height: 28,
+                      borderRadius: 6,
+                      background: "rgba(46,125,50,0.75)",
+                      color: "white",
+                      fontWeight: 700,
+                      fontSize: 12,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      cursor: canAct ? "pointer" : "not-allowed",
+                      opacity: canAct ? 1 : 0.5,
+                    }}
+                  >
+                    Resume Event
+                  </button>
+                ) : (
+                  <button
+                    disabled={!canAct}
+                    onClick={() => {
+                      setEventStatusMsg(null);
+                      socket?.emit?.("admin:event:pause", {}, (ack?: { ok?: boolean; error?: string }) => {
+                        if (ack?.ok) {
+                          setEventStatusMsg({ ok: true, text: "Competition paused." });
+                        } else {
+                          setEventStatusMsg({ ok: false, text: ack?.error ?? "Failed." });
+                        }
+                        setTimeout(() => setEventStatusMsg(null), 4000);
+                      });
+                    }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "4px 10px",
+                      height: 28,
+                      borderRadius: 6,
+                      background: "rgba(255,152,0,0.55)",
+                      color: "white",
+                      fontWeight: 700,
+                      fontSize: 12,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      cursor: canAct ? "pointer" : "not-allowed",
+                      opacity: canAct ? 1 : 0.5,
+                    }}
+                  >
+                    Pause Event
+                  </button>
+                )}
+              </div>
+              {eventStatusMsg ? (
+                <div
+                  style={{
+                    marginTop: 6,
+                    fontSize: 12,
+                    color: eventStatusMsg.ok ? "#a5d6a7" : "#f48fb1",
+                  }}
+                >
+                  {eventStatusMsg.ok ? "✅ " : "❌ "}
+                  {eventStatusMsg.text}
+                </div>
+              ) : null}
+              <div style={{ marginTop: 4, fontSize: 11, opacity: 0.6 }}>
+                PLANNING: no report timers. Click Start Now to begin competition clocks.
+              </div>
             </div>
           </div>
 
@@ -1106,14 +1478,6 @@ export default function AdminPage() {
             >
               Public
             </Link>
-
-            <button
-              onClick={doReloadRoster}
-              disabled={!canAct}
-              style={buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: !canAct })}
-            >
-              Reload Roster
-            </button>
 
             <button
               onClick={() => setConfirmStartNewEvent(true)}
@@ -1180,6 +1544,20 @@ export default function AdminPage() {
             {reloadRosterMsg.text}
           </div>
         ) : null}
+        {clearAllSuccessMsg ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 12,
+              background: "rgba(76,175,80,0.2)",
+              border: "1px solid rgba(76,175,80,0.5)",
+              color: "#a5d6a7",
+            }}
+          >
+            ✅ {clearAllSuccessMsg}
+          </div>
+        ) : null}
 
         {/* =======================
             NEW: Ops Chat / Broadcast (Admin) — additive only
@@ -1208,6 +1586,16 @@ export default function AdminPage() {
             <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>
               Channels: {commChannels.length}
             </span>
+            {totalUnread > 0 ? (
+              <span
+                style={chipStyle(
+                  "rgba(198,40,40,0.9)",
+                  "white",
+                )}
+              >
+                Unread: {totalUnread}
+              </span>
+            ) : null}
           </div>
 
           {commErr ? (
@@ -1291,13 +1679,16 @@ export default function AdminPage() {
             }}
           >
             <div
+              className="comm-left-panel"
               style={{
                 borderRadius: 14,
                 padding: 10,
                 background: "rgba(0,0,0,0.18)",
                 border: "1px solid rgba(255,255,255,0.10)",
                 maxHeight: 320,
-                overflow: "auto",
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
               }}
             >
               {commChannels.length === 0 ? (
@@ -1305,60 +1696,149 @@ export default function AdminPage() {
                   No pad channels yet. Load roster or add pads.
                 </div>
               ) : (
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                >
-                  {commChannels.map((c) => {
-                    const active = c.padId === commSelectedPadId;
-
-                    return (
+                <>
+                  <div
+                    className="comm-left-header"
+                    style={{
+                      flexShrink: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: 6 }}>
                       <button
-                        key={c.padId}
-                        onClick={() => setCommSelectedPadId(c.padId)}
+                        onClick={() => setCommListTab("inbox")}
                         style={{
-                          textAlign: "left",
-                          padding: "10px 12px",
-                          borderRadius: 14,
-                          border: active
-                            ? "2px solid rgba(255,255,255,0.35)"
-                            : "1px solid rgba(255,255,255,0.12)",
-                          background: active
-                            ? "rgba(0,0,0,0.30)"
-                            : "rgba(0,0,0,0.18)",
-                          color: "white",
-                          cursor: "pointer",
+                          ...pillButton(commListTab === "inbox"),
+                          flex: 1,
                         }}
-                        title={c.name}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            alignItems: "baseline",
-                          }}
-                        >
-                          <div style={{ fontWeight: 950 }}>{c.name}</div>
-                          <span
-                            style={chipStyle(
-                              c.online
-                                ? "rgba(46,125,50,0.85)"
-                                : "rgba(0,0,0,0.25)",
-                              "white",
-                            )}
-                          >
-                            {c.online ? "online" : "offline"}
-                          </span>
-                        </div>
-                        <div
-                          style={{ marginTop: 4, opacity: 0.7, fontSize: 12 }}
-                        >
-                          {c.messages.length} messages
-                        </div>
+                        Inbox
                       </button>
-                    );
-                  })}
-                </div>
+                      <button
+                        onClick={() => setCommListTab("pads")}
+                        style={{
+                          ...pillButton(commListTab === "pads"),
+                          flex: 1,
+                        }}
+                      >
+                        Areas
+                      </button>
+                    </div>
+                    {commListTab === "inbox" ? (
+                      <select
+                        value={inboxFilter}
+                        onChange={(e) =>
+                          setInboxFilter(e.target.value as typeof inboxFilter)
+                        }
+                        style={{
+                          ...flatInput,
+                          padding: "6px 10px",
+                          fontSize: 12,
+                        }}
+                      >
+                        <option value="unread">Unread</option>
+                        <option value="recent">Recent</option>
+                      </select>
+                    ) : null}
+                  </div>
+                  <div
+                    className="comm-left-list-scroll"
+                    style={{
+                      flex: 1,
+                      minHeight: 0,
+                      overflowY: "auto",
+                      paddingRight: 6,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    {renderChannels.map((c) => {
+                        const active = c.padId === commSelectedPadId;
+                        const unread = unreadCountByPad[c.padId] ?? 0;
+                        const urgent = hasUrgentUnreadByPad[c.padId];
+                        return (
+                          <button
+                            key={c.padId}
+                            onClick={() => setCommSelectedPadId(c.padId)}
+                            style={{
+                              textAlign: "left",
+                              padding: "10px 12px",
+                              borderRadius: 14,
+                              border: active
+                                ? "2px solid rgba(255,255,255,0.35)"
+                                : "1px solid rgba(255,255,255,0.12)",
+                              background:
+                                active
+                                  ? "rgba(0,0,0,0.30)"
+                                  : unread > 0
+                                    ? "rgba(198,40,40,0.12)"
+                                    : "rgba(0,0,0,0.18)",
+                              color: "white",
+                              cursor: "pointer",
+                            }}
+                            title={c.name}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                alignItems: "baseline",
+                              }}
+                            >
+                              <div style={{ fontWeight: 950 }}>{c.name}</div>
+                              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                {unread > 0 ? (
+                                  <span
+                                    style={{
+                                      ...chipStyle(
+                                        urgent
+                                          ? "rgba(198,40,40,0.95)"
+                                          : "rgba(255,152,0,0.85)",
+                                        "white",
+                                      ),
+                                      minWidth: 20,
+                                      justifyContent: "center",
+                                    }}
+                                  >
+                                    {urgent ? "!" : unread}
+                                  </span>
+                                ) : null}
+                                <span
+                                  style={chipStyle(
+                                    c.online
+                                      ? "rgba(46,125,50,0.85)"
+                                      : "rgba(0,0,0,0.25)",
+                                    "white",
+                                  )}
+                                >
+                                  {c.online ? "online" : "offline"}
+                                </span>
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                marginTop: 4,
+                                opacity: 0.7,
+                                fontSize: 12,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {lastSnippetByPad[c.padId]
+                                ? `${lastSnippetByPad[c.padId]} • ${formatHhmm(lastMsgTsByPad[c.padId] ?? 0)}`
+                                : "(no messages)"}
+                            </div>
+                          </button>
+                        );
+                    })}
+                  </div>
+                </>
               )}
             </div>
 
@@ -1368,6 +1848,10 @@ export default function AdminPage() {
                 padding: 10,
                 background: "rgba(0,0,0,0.18)",
                 border: "1px solid rgba(255,255,255,0.10)",
+                maxHeight: 320,
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
               }}
             >
               <div
@@ -1387,9 +1871,11 @@ export default function AdminPage() {
               </div>
 
               <div
+                ref={chatViewportRef}
                 style={{
                   marginTop: 10,
-                  height: 220,
+                  flex: 1,
+                  minHeight: 0,
                   overflow: "auto",
                   padding: 10,
                   borderRadius: 12,
@@ -1405,6 +1891,13 @@ export default function AdminPage() {
                   selectedChat.slice(-140).map((m) => (
                     <div
                       key={m.id}
+                      ref={(el) => {
+                        if (el) msgElByIdRef.current[m.id] = el;
+                        else delete msgElByIdRef.current[m.id];
+                      }}
+                      data-mid={m.id}
+                      data-mts={m.ts}
+                      data-padid={commSelectedPadId ?? undefined}
                       style={{ marginBottom: 8, display: "flex", gap: 8 }}
                     >
                       <div
@@ -1457,6 +1950,7 @@ export default function AdminPage() {
                   gap: 8,
                   alignItems: "center",
                   flexWrap: "wrap",
+                  flexShrink: 0,
                 }}
               >
                 <label
@@ -1609,8 +2103,8 @@ export default function AdminPage() {
           }
           @media (max-width: 1024px) { .dash3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
           @media (max-width: 640px) { .dash3 { grid-template-columns: 1fr; } }
-          .dashCard { display: flex; flex-direction: column; height: 100%; min-height: 280px; }
-          .dashCardBody { flex: 1; min-height: 0; overflow: auto; margin-top: 10px; }
+          .dashCard { display: flex; flex-direction: column; height: 100%; min-height: 280px; min-width: 0; }
+          .dashCardBody { flex: 1; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; margin-top: 10px; }
         `}</style>
 
         <div className="dash3">
@@ -1862,10 +2356,9 @@ export default function AdminPage() {
                   alignItems: "center",
                 }}
               >
-                <input
-                  type="datetime-local"
+                <DateTimeField
                   value={gbStartLocal}
-                  onChange={(e) => setGbStartLocal(e.target.value)}
+                  onChange={setGbStartLocal}
                   style={{
                     padding: "10px 12px",
                     borderRadius: 12,
@@ -1948,8 +2441,9 @@ export default function AdminPage() {
                 style={{
                   marginTop: 10,
                   display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
+                  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
                   gap: 10,
+                  minWidth: 0,
                 }}
               >
                 <select
@@ -1992,14 +2486,14 @@ export default function AdminPage() {
                 style={{
                   marginTop: 10,
                   display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
+                  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
                   gap: 10,
+                  minWidth: 0,
                 }}
               >
-                <input
-                  type="datetime-local"
+                <DateTimeField
                   value={schStart}
-                  onChange={(e) => setSchStart(e.target.value)}
+                  onChange={setSchStart}
                   style={{
                     padding: "10px 12px",
                     borderRadius: 12,
@@ -2009,10 +2503,9 @@ export default function AdminPage() {
                     outline: "none",
                   }}
                 />
-                <input
-                  type="datetime-local"
+                <DateTimeField
                   value={schEnd}
-                  onChange={(e) => setSchEnd(e.target.value)}
+                  onChange={setSchEnd}
                   style={{
                     padding: "10px 12px",
                     borderRadius: 12,
@@ -2062,7 +2555,8 @@ export default function AdminPage() {
                   border: "1px solid rgba(255,255,255,0.10)",
                   padding: 10,
                   maxHeight: 180,
-                  overflow: "auto",
+                  overflowX: "hidden",
+                  overflowY: "auto",
                 }}
               >
                 {schedule.length === 0 ? (
@@ -2280,6 +2774,27 @@ export default function AdminPage() {
 
               <button
                 disabled={!canAct}
+                onClick={doReloadRoster}
+                title="Reload roster from server CSV baseline"
+                style={{
+                  ...buttonStyle({ bg: "rgba(0,0,0,0.22)", disabled: !canAct }),
+                  display: "inline-flex",
+                  width: "auto",
+                  minWidth: "unset",
+                  height: 32,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  fontWeight: 850,
+                  fontSize: 13,
+                  letterSpacing: 0.2,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Reload Roster
+              </button>
+
+              <button
+                disabled={!canAct}
                 onClick={() => setConfirmClearAll(true)}
                 title="Hard reset: clears NOW/ONDECK/STANDBY across all areas"
                 style={{
@@ -2416,6 +2931,71 @@ export default function AdminPage() {
         </div>
 
         {/* =======================
+            Start Now confirm modal
+           ======================= */}
+        {confirmStartNow && (
+          <div onClick={() => setConfirmStartNow(false)} style={modalBackdrop}>
+            <div onClick={(e) => e.stopPropagation()} style={modalCard}>
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                Start Competition Now?
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  opacity: 0.85,
+                  fontSize: 13,
+                  lineHeight: 1.35,
+                }}
+              >
+                This will start competition clocks and report timers. This cannot be undone (unless you reset the event).
+              </div>
+
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  onClick={() => setConfirmStartNow(false)}
+                  style={buttonStyle({
+                    bg: "rgba(0,0,0,0.25)",
+                    disabled: false,
+                  })}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setConfirmStartNow(false);
+                    setEventStatusMsg(null);
+                    socket?.emit?.("admin:event:startNow", {}, (ack?: { ok?: boolean; error?: string }) => {
+                      if (ack?.ok) {
+                        setEventStatusMsg({ ok: true, text: "Event started (LIVE)." });
+                      } else {
+                        setEventStatusMsg({ ok: false, text: ack?.error ?? "Failed." });
+                      }
+                      setTimeout(() => setEventStatusMsg(null), 4000);
+                    });
+                  }}
+                  disabled={!canAct}
+                  style={buttonStyle({
+                    bg: "rgba(46,125,50,0.85)",
+                    fg: "white",
+                    disabled: !canAct,
+                  })}
+                >
+                  Start Now
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* =======================
             CLEAR ALL confirm modal
            ======================= */}
         {confirmClearAll && (
@@ -2432,8 +3012,9 @@ export default function AdminPage() {
                   lineHeight: 1.35,
                 }}
               >
-                This will remove <b>ALL participants</b> from NOW, ON DECK, and
-                STANDBY across every area. This cannot be undone.
+                This will <b>DELETE ALL training areas</b> and remove ALL
+                participants from NOW, ON DECK, and STANDBY. This cannot be
+                undone.
               </div>
 
               <div
@@ -2493,8 +3074,9 @@ export default function AdminPage() {
                   lineHeight: 1.35,
                 }}
               >
-                This will clear Ops Chat and (optionally) reset queues. This
-                cannot be undone.
+                {resetScope.clearAreas
+                  ? "This will clear Ops Chat and DELETE ALL training areas. This cannot be undone."
+                  : "This will clear Ops Chat and (optionally) reset queues. This cannot be undone."}
               </div>
 
               {resetError ? (
@@ -2597,6 +3179,26 @@ export default function AdminPage() {
                     }
                   />
                   Reset Event Header Label
+                </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={resetScope.clearAreas}
+                    onChange={(e) =>
+                      setResetScope((s) => ({
+                        ...s,
+                        clearAreas: e.target.checked,
+                      }))
+                    }
+                  />
+                  Clear training areas (delete ALL areas)
                 </label>
               </div>
 

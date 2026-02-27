@@ -1,6 +1,6 @@
-// pages/api/admin-login.ts
+// pages/api/admin-login.ts — Legacy: admin-only login. Prefer /api/auth/login with role=admin.
 import type { NextApiRequest, NextApiResponse } from "next";
-import { setCookie } from "@/lib/ui";
+import { signRolePayload } from "@/lib/auth";
 import { checkLoginRateLimit, recordFailedAttempt } from "@/lib/rateLimit";
 
 function getClientIp(req: NextApiRequest): string {
@@ -8,6 +8,8 @@ function getClientIp(req: NextApiRequest): string {
   if (typeof forwarded === "string") return forwarded.split(",")[0]?.trim() ?? "unknown";
   return req.socket?.remoteAddress ?? "unknown";
 }
+
+const ROLE_COOKIE_MAX_AGE_SEC = 43200;
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -34,8 +36,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(401).json({ error: "Invalid password" });
   }
 
-  // 12 hours
-  setCookie(res, "cacc_admin", "1", { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 60 * 60 * 12 });
+  const adminCookie = `cacc_admin=1; Path=/; Max-Age=${60 * 60 * 12}; SameSite=Lax; HttpOnly${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+  const signed = signRolePayload("admin");
+  const roleCookie = `cacc_role=${encodeURIComponent(signed)}; Path=/; Max-Age=${ROLE_COOKIE_MAX_AGE_SEC}; SameSite=Lax; HttpOnly${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+  res.setHeader("Set-Cookie", [adminCookie, roleCookie]);
 
   return res.status(200).json({ ok: true });
 }

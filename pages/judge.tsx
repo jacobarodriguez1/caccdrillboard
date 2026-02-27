@@ -10,6 +10,7 @@ import type {
   ScheduleEvent,
   Team,
 } from "@/lib/state";
+import { getCompetitionNowMs } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
 import { fmtTime, buttonStyle, chipStyle, mmssFromSeconds } from "@/lib/ui";
 import { requireAdminRole } from "@/lib/auth";
@@ -179,13 +180,16 @@ export default function JudgeConsole() {
 
   const [state, setState] = useState<BoardState | null>(null);
 
-  const [activePadId, setActivePadId] = useState(1);
+  const [lockedPadId, setLockedPadId] = useState<number | null>(null);
+  const [pendingPadId, setPendingPadId] = useState<number | null>(null);
+  const [showConfirmChangeArea, setShowConfirmChangeArea] = useState(false);
   const [lastAction, setLastAction] = useState("—");
+  const [judgeBound, setJudgeBound] = useState(false);
+
+  const activePadId = lockedPadId;
 
   const [, tick] = useState(0);
 
-  const [toolsOpen, setToolsOpen] = useState(true);
-  const [moreOpen, setMoreOpen] = useState(false);
 
   // Manual add modal
   const [showAdd, setShowAdd] = useState(false);
@@ -203,8 +207,6 @@ export default function JudgeConsole() {
   // Pad label editor
   const [labelDraft, setLabelDraft] = useState("");
 
-  // Confirm clear modal
-  const [showConfirmClear, setShowConfirmClear] = useState(false);
 
   // Ops Chat (Judge ↔ Admin)
   const [commSnap, setCommSnap] = useState<CommSnapshot | null>(null);
@@ -214,6 +216,22 @@ export default function JudgeConsole() {
 
   // used only to prevent burst presence spam on rapid pad switches
   const lastPresenceSentAtRef = useRef<number>(0);
+  const assignedPadRef = useRef<number | null>(null);
+  assignedPadRef.current = activePadId;
+
+  const JUDGE_PAD_STORAGE_KEY = "cacc_judge_pad";
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(JUDGE_PAD_STORAGE_KEY);
+      if (raw != null) {
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n > 0) setLockedPadId(n);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     fetch("/api/socket");
@@ -231,13 +249,27 @@ export default function JudgeConsole() {
     const onDisconnect = () => {
       setConnected(false);
       setSocketId("");
+      setJudgeBound(false);
     };
 
-    const onState = (next: BoardState) => setState(next);
+    const onState = (next: BoardState) => {
+      const padId = assignedPadRef.current;
+      const pad = (next?.pads ?? []).find((p: { id: number }) => p.id === padId);
+      if (pad && typeof window !== "undefined") {
+        console.log("[judge:state] pad", padId, "now=", pad.now?.id ?? null, "onDeck=", pad.onDeck?.id ?? null, "standbyLen=", (pad.standby ?? []).length);
+      }
+      setState(next);
+    };
+
+    const onJudgeError = (payload: { message?: string }) => {
+      const msg = payload?.message ?? "Error";
+      setLastAction(`❌ ${msg}`);
+    };
 
     s.on("connect", onConnect);
     s.on("disconnect", onDisconnect);
     s.on("state", onState);
+    s.on("judge:error", onJudgeError);
 
     setConnected(Boolean(s.connected));
     if (Boolean(s.connected)) {
@@ -250,12 +282,7 @@ export default function JudgeConsole() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setShowAdd(false);
-        setShowConfirmClear(false);
-        setMoreOpen(false);
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setToolsOpen((v) => !v);
+        setShowConfirmChangeArea(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -264,6 +291,7 @@ export default function JudgeConsole() {
       s.off?.("connect", onConnect);
       s.off?.("disconnect", onDisconnect);
       s.off?.("state", onState);
+      s.off?.("judge:error", onJudgeError);
       clearInterval(interval);
       window.removeEventListener("keydown", onKey);
     };
@@ -272,12 +300,25 @@ export default function JudgeConsole() {
 
   const pads = useMemo(() => state?.pads ?? [], [state]);
   const nowMs = Date.now();
+  const compNowMs = getCompetitionNowMs(state ?? null, nowMs);
+  const isLive = (state as any)?.eventStatus === "LIVE";
 
   useEffect(() => {
-    if (pads.length === 0) return;
-    const exists = pads.some((p) => p.id === activePadId);
-    if (!exists) setActivePadId(pads[0].id);
-  }, [pads, activePadId]);
+    if (pads.length === 0) return; // Don't clear on initial load before state
+    setLockedPadId((prev) => {
+      if (prev == null) return prev;
+      const exists = pads.some((p) => p.id === prev);
+      const next = exists ? prev : pads[0].id;
+      if (next !== prev) {
+        try {
+          localStorage.setItem(JUDGE_PAD_STORAGE_KEY, String(next));
+        } catch {
+          /* ignore */
+        }
+      }
+      return next;
+    });
+  }, [pads]);
 
   const pad: Pad | null = useMemo(
     () => pads.find((p) => p.id === activePadId) ?? null,
@@ -287,10 +328,10 @@ export default function JudgeConsole() {
   useEffect(() => {
     if (!pad) return;
     setLabelDraft(pad.label ?? "");
-    setMoreOpen(false);
   }, [pad?.id]);
 
-  const canEmit = !!socket?.emit && connected;
+  const canEmit = !!socket?.emit && connected && judgeBound;
+  const canActOnPad = canEmit && !!pad;
 
   // ===== Ops Chat wiring (Judge ↔ Admin) =====
   useEffect(() => {
@@ -312,19 +353,55 @@ export default function JudgeConsole() {
     socket.on?.("comm:snapshot", onSnap);
     socket.on?.("comm:broadcast", onBroadcast);
 
-    // Join pad channel (server keys chats by padId)
-    socket.emit?.("comm:joinPad", { padId: activePadId });
-
     return () => {
       socket.off?.("comm:snapshot", onSnap);
       socket.off?.("comm:broadcast", onBroadcast);
     };
-  }, [socket, activePadId]);
+  }, [socket]);
+
+  // ===== Judge area bind handshake (must succeed before actions work) =====
+  useEffect(() => {
+    if (!socket || lockedPadId == null) {
+      setJudgeBound(false);
+      return;
+    }
+
+    setJudgeBound(false);
+
+    const doBind = () => {
+      (socket as any).emit?.(
+        "judge:area:set",
+        { padId: lockedPadId },
+        (res: { ok?: boolean; assignedPadId?: number; error?: string }) => {
+          if (res?.ok === true) {
+            setJudgeBound(true);
+            setLastAction("—");
+            (socket as any).emit?.("comm:joinPad", { padId: lockedPadId });
+          } else {
+            setJudgeBound(false);
+            setLastAction(`❌ Bind failed: ${res?.error ?? "unknown"}`);
+          }
+        },
+      );
+    };
+
+    doBind();
+
+    const onConnect = () => {
+      if (lockedPadId != null) doBind();
+    };
+
+    socket.on?.("connect", onConnect);
+    return () => {
+      socket.off?.("connect", onConnect);
+    };
+  }, [socket, lockedPadId]);
 
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !judgeBound) return;
 
     const sendPresence = () => {
+      if (activePadId == null) return;
       const now = Date.now();
       if (now - lastPresenceSentAtRef.current < 500) return; // small burst guard
       lastPresenceSentAtRef.current = now;
@@ -335,7 +412,7 @@ export default function JudgeConsole() {
     const t = setInterval(sendPresence, 15000);
 
     return () => clearInterval(t);
-  }, [socket, activePadId]);
+  }, [socket, activePadId, judgeBound]);
 
   const myChat: CommMessage[] =
     commSnap?.channels?.find((c) => c.padId === activePadId)?.messages ?? [];
@@ -411,38 +488,53 @@ export default function JudgeConsole() {
 
   const globalBreakActive =
     (!gbStart || nowMs >= gbStart) && !!gbUntil && nowMs < gbUntil;
+  const effectiveNow = compNowMs ?? nowMs;
   const globalBreakRemaining =
-    globalBreakActive && gbUntil ? (gbUntil - nowMs) / 1000 : null;
+    globalBreakActive && gbUntil ? (gbUntil - effectiveNow) / 1000 : null;
 
-  // Local pad state
-  const localBreakActive = !!pad?.breakUntilAt && pad.breakUntilAt > nowMs;
+  // Local pad state (gated by isLive in PLANNING mode)
+  const localBreakActive = isLive && !!pad?.breakUntilAt && pad.breakUntilAt > effectiveNow;
   const localBreakRemaining =
-    localBreakActive && pad?.breakUntilAt
-      ? (pad.breakUntilAt - nowMs) / 1000
+    isLive && localBreakActive && pad?.breakUntilAt
+      ? (pad.breakUntilAt - effectiveNow) / 1000
       : null;
 
   const arrivedValid = !!pad && isArrivedForNow(pad);
 
-  const reportActive = !!pad && !globalBreakActive && reportIsValid(pad, nowMs);
+  // Dedicated tick for on-pad timer so it counts up even without other state updates
+  const onPadUnitId = pad?.now?.id ?? null;
+  const arrivedAtMs = pad?.nowArrivedAt ?? null;
+  const [onPadTick, setOnPadTick] = useState(0);
+  useEffect(() => {
+    if (arrivedAtMs == null) return;
+    const id = setInterval(() => setOnPadTick((t) => t + 1), 500);
+    return () => clearInterval(id);
+  }, [arrivedAtMs, onPadUnitId]);
+
+  const reportActive = isLive && !!pad && !globalBreakActive && reportIsValid(pad, effectiveNow);
   const reportSecondsRemaining =
-    reportActive && pad?.reportByDeadlineAt
-      ? (pad.reportByDeadlineAt - nowMs) / 1000
+    isLive && reportActive && pad?.reportByDeadlineAt
+      ? (pad.reportByDeadlineAt - effectiveNow) / 1000
       : null;
   const reportIsLate =
     reportSecondsRemaining !== null && reportSecondsRemaining < 0;
 
-  const onPadSeconds =
-    arrivedValid && pad?.nowArrivedAt
-      ? (nowMs - pad.nowArrivedAt) / 1000
-      : null;
+  void onPadTick; // ensure tick drives re-renders (prevents React optimization)
+  const elapsedSec = arrivedAtMs ? Math.floor(Math.max(0, (Date.now() - arrivedAtMs) / 1000)) : 0;
 
-  const canAdvance = canEmit && !globalBreakActive && !localBreakActive;
+  const canAdvance = canActOnPad && !globalBreakActive && !localBreakActive;
+  const canMarkArrived = canAdvance && !!pad?.now && !arrivedValid;
+  const canMarkComplete = canAdvance && !!pad?.now;
+  const canSkipTeam =
+    canAdvance &&
+    !!pad?.now &&
+    (!!pad?.onDeck || (pad?.standby?.length ?? 0) > 0);
 
   const payloadBase = {
     padId: activePadId,
     id: activePadId,
     pad: activePadId,
-    padIndex: Math.max(0, activePadId - 1),
+    padIndex: Math.max(0, (activePadId ?? 0) - 1),
   };
 
   function emit(event: string, payload: any, label: string) {
@@ -450,40 +542,48 @@ export default function JudgeConsole() {
     setLastAction(`✅ ${label}`);
     socket!.emit!(event, payload);
   }
+  const emitPad = (event: string, payload: any, label: string) => {
+    if (!canActOnPad) return;
+    emit(event, payload, label);
+  };
+  const emitPadWithAck = (
+    event: string,
+    payload: any,
+    label: string,
+    ack: (res: { ok: boolean; error?: string }) => void,
+  ) => {
+    if (!canActOnPad) return;
+    setLastAction(`${label} …`);
+    (socket as any)?.emit?.(event, payload, (res: { ok?: boolean; error?: string }) => {
+      const ok = res?.ok === true;
+      if (ok) {
+        setLastAction(`✅ ${label}`);
+      } else {
+        setLastAction(`❌ ${label}${res?.error ? `: ${res.error}` : ""}`);
+      }
+      ack({ ok, error: res?.error });
+    });
+  };
 
   async function logout() {
     try {
       await fetch("/api/admin-logout", { method: "POST" });
     } catch {}
-    window.location.href = "/login";
+    window.location.href = "/judge/login";
   }
 
   // Primary actions
-  const doArrived = () => emit("judge:arrived", payloadBase, "MARK ARRIVED");
-  const doComplete = () => emit("judge:complete", payloadBase, "COMPLETE");
-  const doUndo = () => emit("judge:undo", payloadBase, "UNDO");
+  const doArrived = () => emitPad("judge:arrived", payloadBase, "MARK ARRIVED");
+  const doComplete = () => emitPad("judge:complete", payloadBase, "COMPLETE");
+  const doUndo = () => emitPad("judge:undo", payloadBase, "UNDO");
 
   // Secondary ops
-  const doSwap = () => emit("judge:swap", payloadBase, "SWAP NOW/ON DECK");
-  const doSkip = () => emit("judge:skipOnDeck", payloadBase, "SKIP ON DECK");
-
-  // Exceptions
-  const doHold = () => emit("judge:hold", payloadBase, "HOLD");
-  const doDNS = () => emit("judge:dns", payloadBase, "DNS");
-  const doDQ = () => emit("judge:dq", payloadBase, "DQ");
-
-  const doClear = () => {
-    setMoreOpen(false);
-    setShowConfirmClear(true);
-  };
-  const confirmClear = () => {
-    emit("judge:clear", payloadBase, "CLEAR PAD");
-    setShowConfirmClear(false);
-  };
+  const doSkip = () =>
+    emitPadWithAck("judge:skipNow", payloadBase, "Skip Team", () => {});
 
   const doStartBreak = () => {
     const mins = Math.max(1, Number(breakMinutes || 10));
-    emit(
+    emitPad(
       "judge:startBreak",
       {
         ...payloadBase,
@@ -494,19 +594,19 @@ export default function JudgeConsole() {
       `START BREAK (${mins}m)`,
     );
   };
-  const doEndBreak = () => emit("judge:endBreak", payloadBase, "END BREAK");
+  const doEndBreak = () => emitPad("judge:endBreak", payloadBase, "END BREAK");
 
   const doSetLabel = () => {
     const label = labelDraft.trim();
     if (!label) return;
-    emit("judge:setPadLabel", { ...payloadBase, label }, "SET PAD LABEL");
+    emitPad("judge:setPadLabel", { ...payloadBase, label }, "SET PAD LABEL");
   };
 
   const doAddTeam = () => {
     const teamName = addTeamName.trim();
     if (!teamName) return;
 
-    emit(
+    emitPad(
       "judge:addTeam",
       {
         ...payloadBase,
@@ -530,7 +630,7 @@ export default function JudgeConsole() {
   };
 
   // ARRIVED button “ops-glow” when reporting is active
-  const arrivedBtnStyle: React.CSSProperties = !canEmit
+  const arrivedBtnStyle: React.CSSProperties = !canActOnPad
     ? buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: true })
     : arrivedValid
       ? {
@@ -568,12 +668,8 @@ export default function JudgeConsole() {
           gap: 14px;
           margin-top: 14px;
         }
-        @media (min-width: 1025px) {
-          .toolsToggle { display: none; }
-        }
         @media (max-width: 1024px) {
-          .layout.judge-layout { grid-template-columns: 200px minmax(0, 1fr); }
-          .toolsCol.judge-tools-col { display: none; }
+          .layout.judge-layout { grid-template-columns: 200px minmax(0, 1fr) min(360px, 30vw); }
         }
         @media (max-width: 640px) {
           .layout.judge-layout { grid-template-columns: 1fr; }
@@ -684,35 +780,16 @@ export default function JudgeConsole() {
               {connected ? "LIVE" : "CONNECTING"}
             </span>
 
-            <button
-              className="toolsToggle"
-              onClick={() => setToolsOpen((v) => !v)}
-              style={{
-                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-              }}
-              title="Toggle tools (Ctrl/Cmd+K)"
-            >
-              {toolsOpen ? "Hide Tools" : "Show Tools"}
-            </button>
-
-            <Link
-              href="/public"
-              style={{
-                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-                textDecoration: "none",
-              }}
-            >
-              Public
-            </Link>
-            <Link
-              href="/admin"
-              style={{
-                ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-                textDecoration: "none",
-              }}
-            >
-              Admin
-            </Link>
+            {lockedPadId != null && pad ? (
+              <span
+                style={chipStyle(
+                  judgeBound ? "rgba(76, 175, 80, 0.35)" : "rgba(255, 152, 0, 0.35)",
+                  "white",
+                )}
+              >
+                {judgeBound ? `Assigned: Pad ${lockedPadId}` : "Binding…"}
+              </span>
+            ) : null}
 
             <button
               onClick={logout}
@@ -775,37 +852,74 @@ export default function JudgeConsole() {
               }}
             >
               <div style={{ fontWeight: 1000 }}>Areas</div>
-              <div style={{ fontSize: 11, opacity: 0.75 }}>Toggle</div>
+              <div style={{ fontSize: 11, opacity: 0.75 }}>
+              {lockedPadId != null ? "Assigned" : "Select area"}
+            </div>
             </div>
 
             <div
               style={{
-                marginTop: 10,
+                marginTop: 4,
                 display: "flex",
                 flexDirection: "column",
                 gap: 8,
               }}
             >
-              {pads.map((p) => {
-                const active = p.id === activePadId;
+              {pads.length === 0 ? (
+                <div style={{ opacity: 0.75, fontSize: 13 }}>No areas yet.</div>
+              ) : (
+              pads.map((p) => {
+                const isLocked = p.id === lockedPadId;
+                const handleClick = () => {
+                  if (lockedPadId === null) {
+                    setLockedPadId(p.id);
+                    try {
+                      localStorage.setItem(JUDGE_PAD_STORAGE_KEY, String(p.id));
+                    } catch {
+                      /* ignore */
+                    }
+                    socket?.emit?.("judge:area:set", { padId: p.id });
+                  } else if (p.id === lockedPadId) {
+                    /* no-op */
+                  } else {
+                    setPendingPadId(p.id);
+                    setShowConfirmChangeArea(true);
+                  }
+                };
                 return (
                   <button
                     key={p.id}
-                    onClick={() => setActivePadId(p.id)}
+                    onClick={handleClick}
                     style={{
+                      position: "relative",
                       textAlign: "left",
                       padding: "10px 12px",
                       borderRadius: 14,
-                      border: active
-                        ? "2px solid rgba(255,255,255,0.35)"
+                      border: isLocked
+                        ? "2.5px solid rgba(76, 175, 80, 0.7)"
                         : "1px solid rgba(255,255,255,0.12)",
-                      background: active
-                        ? "rgba(0,0,0,0.30)"
+                      background: isLocked
+                        ? "rgba(76, 175, 80, 0.20)"
                         : "rgba(0,0,0,0.18)",
                       color: "white",
                       cursor: "pointer",
+                      opacity: isLocked ? 1 : 0.85,
                     }}
                   >
+                    {isLocked ? (
+                      <span
+                        style={{
+                          position: "absolute",
+                          top: 8,
+                          right: 10,
+                          fontSize: 10,
+                          opacity: 0.7,
+                          letterSpacing: 0.3,
+                        }}
+                      >
+                        Assigned
+                      </span>
+                    ) : null}
                     <div style={{ fontWeight: 950 }}>{areaName(p)}</div>
                     <div
                       style={{
@@ -821,7 +935,8 @@ export default function JudgeConsole() {
                     </div>
                   </button>
                 );
-              })}
+              })
+              )}
             </div>
           </aside>
 
@@ -899,13 +1014,14 @@ export default function JudgeConsole() {
                   Manual Add
                 </button>
                 <button
-                  onClick={() => setToolsOpen((v) => !v)}
+                  disabled={!canEmit}
+                  onClick={doUndo}
                   style={buttonStyle({
                     bg: "rgba(0,0,0,0.25)",
-                    disabled: false,
+                    disabled: !canEmit,
                   })}
                 >
-                  Tools ▾
+                  Undo
                 </button>
               </div>
             </div>
@@ -927,7 +1043,7 @@ export default function JudgeConsole() {
                         fontWeight: 1000,
                       }}
                     >
-                      {mmssFromSeconds(localBreakRemaining ?? 0)}
+                      {localBreakRemaining != null ? mmssFromSeconds(localBreakRemaining) : "—"}
                     </span>
                   }
                   competitorContent={(pad.breakReason ?? "Break").trim()}
@@ -992,7 +1108,7 @@ export default function JudgeConsole() {
                         fontWeight: 1000,
                       }}
                     >
-                      {mmss(onPadSeconds ?? 0)}
+                      {arrivedAtMs != null ? mmss(elapsedSec) : "—"}
                     </span>
                   }
                   competitorContent={pad.now?.name ?? "—"}
@@ -1008,200 +1124,79 @@ export default function JudgeConsole() {
                   statusAccent="rgba(255,255,255,0.12)"
                   statusBadge={
                     <span style={chipStyle("rgba(255,255,255,0.12)", "white")}>
-                      IDLE
+                      {isLive ? "IDLE" : "PLANNING"}
                     </span>
                   }
-                  competitorContent="Ready"
-                  subContent="No active timers on this pad right now."
+                  competitorContent={pad?.now?.name ?? "Ready"}
+                  subContent={
+                    isLive
+                      ? "No active timers on this pad right now."
+                      : "Event not started. Admin must click Start Now to begin."
+                  }
                   bannerOverrides={{
                     background: "rgba(0,0,0,0.22)",
                     border: "1px solid rgba(255,255,255,0.10)",
                   }}
                 />
               )}
-            </div>
 
-            {/* Actions */}
-            <div
-              style={{
-                marginTop: 14,
-                display: "flex",
-                gap: 10,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
-              <button
-                disabled={!canAdvance}
-                onClick={doArrived}
-                style={arrivedBtnStyle}
-              >
-                MARK ARRIVED
-              </button>
-              <button
-                disabled={!canAdvance}
-                onClick={doComplete}
-                style={buttonStyle({
-                  bg: "var(--cacc-gold)",
-                  fg: "#111",
-                  disabled: !canAdvance,
-                })}
-              >
-                COMPLETE
-              </button>
-              <button
-                disabled={!canEmit}
-                onClick={doUndo}
-                style={buttonStyle({
-                  bg: "rgba(0,0,0,0.25)",
-                  disabled: !canEmit,
-                })}
-              >
-                UNDO
-              </button>
-
-              <span style={{ opacity: 0.6, marginLeft: 4 }}>|</span>
-
-              <button
-                disabled={!canAdvance}
-                onClick={doSwap}
-                style={buttonStyle({
-                  bg: "rgba(0,0,0,0.25)",
-                  disabled: !canAdvance,
-                })}
-              >
-                SWAP
-              </button>
-              <button
-                disabled={!canAdvance}
-                onClick={doSkip}
-                style={buttonStyle({
-                  bg: "rgba(0,0,0,0.25)",
-                  disabled: !canAdvance,
-                })}
-              >
-                SKIP ON DECK
-              </button>
-
-              <div style={{ position: "relative", marginLeft: "auto" }}>
-                <button
-                  disabled={!canEmit}
-                  onClick={() => setMoreOpen((v) => !v)}
-                  style={buttonStyle({
-                    bg: "rgba(0,0,0,0.25)",
-                    disabled: !canEmit,
-                  })}
+              {/* NOW team actions: single row under the NOW card */}
+              {pad?.now ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    display: "flex",
+                    flexDirection: "row",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    alignItems: "stretch",
+                  }}
                 >
-                  More ▾
-                </button>
-
-                {moreOpen ? (
-                  <div
+                  <button
+                    disabled={!canMarkArrived}
+                    onClick={doArrived}
                     style={{
-                      position: "absolute",
-                      right: 0,
-                      top: "calc(100% + 8px)",
-                      width: 240,
-                      borderRadius: 14,
-                      background: "rgba(10, 14, 28, 0.98)",
-                      border: "1px solid rgba(255,255,255,0.16)",
-                      boxShadow: "0 18px 50px rgba(0,0,0,0.45)",
-                      padding: 10,
-                      zIndex: 20,
+                      ...arrivedBtnStyle,
+                      flex: "1 1 0",
+                      minWidth: 100,
                     }}
                   >
-                    <div
-                      style={{
-                        fontSize: 11,
-                        opacity: 0.75,
-                        marginBottom: 8,
-                        fontWeight: 900,
-                        letterSpacing: 1.0,
-                      }}
-                    >
-                      EXCEPTIONS
-                    </div>
-
-                    <button
-                      disabled={!canAdvance}
-                      onClick={() => {
-                        doHold();
-                        setMoreOpen(false);
-                      }}
-                      style={{
-                        ...buttonStyle({
-                          bg: "rgba(0,0,0,0.25)",
-                          disabled: !canAdvance,
-                        }),
-                        width: "100%",
-                        marginBottom: 8,
-                      }}
-                    >
-                      HOLD
-                    </button>
-                    <button
-                      disabled={!canAdvance}
-                      onClick={() => {
-                        doDNS();
-                        setMoreOpen(false);
-                      }}
-                      style={{
-                        ...buttonStyle({
-                          bg: "rgba(0,0,0,0.25)",
-                          disabled: !canAdvance,
-                        }),
-                        width: "100%",
-                        marginBottom: 8,
-                      }}
-                    >
-                      DNS
-                    </button>
-                    <button
-                      disabled={!canAdvance}
-                      onClick={() => {
-                        doDQ();
-                        setMoreOpen(false);
-                      }}
-                      style={{
-                        ...buttonStyle({
-                          bg: "rgba(0,0,0,0.25)",
-                          disabled: !canAdvance,
-                        }),
-                        width: "100%",
-                        marginBottom: 10,
-                      }}
-                    >
-                      DQ
-                    </button>
-
-                    <div
-                      style={{
-                        height: 1,
-                        background: "rgba(255,255,255,0.10)",
-                        margin: "8px 0",
-                      }}
-                    />
-
-                    <button
-                      disabled={!canEmit}
-                      onClick={doClear}
-                      style={{
-                        ...buttonStyle({
-                          bg: COLOR_RED,
-                          fg: "white",
-                          disabled: !canEmit,
-                        }),
-                        width: "100%",
-                      }}
-                    >
-                      CLEAR AREA…
-                    </button>
-                  </div>
-                ) : null}
-              </div>
+                    Mark Arrived
+                  </button>
+                  <button
+                    disabled={!canMarkComplete}
+                    onClick={doComplete}
+                    style={{
+                      ...buttonStyle({
+                        bg: "var(--cacc-gold)",
+                        fg: "#111",
+                        disabled: !canMarkComplete,
+                      }),
+                      flex: "1 1 0",
+                      minWidth: 100,
+                    }}
+                  >
+                    Mark Complete
+                  </button>
+                  <button
+                    disabled={!canSkipTeam}
+                    onClick={doSkip}
+                    style={{
+                      ...buttonStyle({
+                        bg: "rgba(0,0,0,0.25)",
+                        disabled: !canSkipTeam,
+                      }),
+                      flex: "1 1 0",
+                      minWidth: 80,
+                    }}
+                  >
+                    Skip Team
+                  </button>
+                </div>
+              ) : null}
             </div>
 
-            {/* On Deck & Standby (competitor shown once in Primary above) */}
+            {/* On Deck & Standby (informational only) */}
             <div style={{ marginTop: 14 }}>
               <PadOnDeckSection
                 variant="operational"
@@ -1247,10 +1242,7 @@ export default function JudgeConsole() {
           </section>
 
           {/* RIGHT: Tools */}
-          <aside
-            className="toolsCol judge-tools-col"
-            style={{ display: toolsOpen ? "block" : "none" }}
-          >
+          <aside className="toolsCol judge-tools-col">
             <div style={{ ...cardStyle(), padding: 14 }}>
               <div
                 style={{
@@ -1260,7 +1252,6 @@ export default function JudgeConsole() {
                 }}
               >
                 <div style={{ fontWeight: 1000 }}>Tools</div>
-                <div style={{ fontSize: 11, opacity: 0.75 }}>Ctrl/Cmd+K</div>
               </div>
 
               {/* =========================
@@ -1286,7 +1277,7 @@ export default function JudgeConsole() {
                   <div style={{ fontWeight: 1000 }}>🗨️ Ops Chat</div>
                   <div style={{ opacity: 0.75, fontSize: 12 }}>
                     <div style={{ opacity: 0.75, fontSize: 12 }}>
-                      Area {activePadId}
+                      Area {activePadId ?? "—"}
                     </div>
                   </div>
                 </div>
@@ -1454,7 +1445,7 @@ export default function JudgeConsole() {
                 </div>
               </div>
 
-              {/* Local Break */}
+              {/* Area Break */}
               <div
                 style={{
                   marginTop: 12,
@@ -1464,9 +1455,9 @@ export default function JudgeConsole() {
                   border: `1px solid rgba(255,152,0,0.35)`,
                 }}
               >
-                <div style={{ fontWeight: 1000 }}>🟠 Local Break</div>
+                <div style={{ fontWeight: 1000 }}>🟠 Area Break</div>
                 <div style={{ marginTop: 8, opacity: 0.75, fontSize: 12 }}>
-                  Start a pad-only break. If pressed during reporting, it
+                  Start an area-only break. If pressed during reporting, it
                   overrides the report timer.
                 </div>
 
@@ -1620,33 +1611,6 @@ export default function JudgeConsole() {
                 </div>
               </div>
 
-              <div
-                style={{
-                  marginTop: 12,
-                  display: "flex",
-                  gap: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                <Link
-                  href="/public"
-                  style={{
-                    ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-                    textDecoration: "none",
-                  }}
-                >
-                  Public View
-                </Link>
-                <Link
-                  href="/admin"
-                  style={{
-                    ...buttonStyle({ bg: "rgba(0,0,0,0.25)", disabled: false }),
-                    textDecoration: "none",
-                  }}
-                >
-                  Admin
-                </Link>
-              </div>
             </div>
           </aside>
         </div>
@@ -1849,8 +1813,8 @@ export default function JudgeConsole() {
           </div>
         ) : null}
 
-        {/* Confirm CLEAR modal */}
-        {showConfirmClear ? (
+        {/* Confirm CHANGE AREA modal */}
+        {showConfirmChangeArea && pendingPadId != null && pad ? (
           <div
             style={{
               position: "fixed",
@@ -1862,7 +1826,10 @@ export default function JudgeConsole() {
               padding: 16,
               zIndex: 60,
             }}
-            onClick={() => setShowConfirmClear(false)}
+            onClick={() => {
+              setShowConfirmChangeArea(false);
+              setPendingPadId(null);
+            }}
           >
             <div
               onClick={(e) => e.stopPropagation()}
@@ -1876,7 +1843,7 @@ export default function JudgeConsole() {
               }}
             >
               <div style={{ fontWeight: 1000, fontSize: 18 }}>
-                Confirm CLEAR AREA
+                Change Judging Area?
               </div>
               <div
                 style={{
@@ -1886,8 +1853,8 @@ export default function JudgeConsole() {
                   lineHeight: 1.35,
                 }}
               >
-                This clears <b>NOW</b>, <b>ON DECK</b>, <b>STANDBY</b>, and all
-                timers for Area {activePadId}.
+                You are currently assigned to Pad {lockedPadId} — {areaName(pad)}.
+                Changing areas may affect scoring. Continue?
               </div>
 
               <div
@@ -1900,7 +1867,10 @@ export default function JudgeConsole() {
                 }}
               >
                 <button
-                  onClick={() => setShowConfirmClear(false)}
+                  onClick={() => {
+                    setShowConfirmChangeArea(false);
+                    setPendingPadId(null);
+                  }}
                   style={buttonStyle({
                     bg: "rgba(0,0,0,0.25)",
                     disabled: false,
@@ -1910,14 +1880,27 @@ export default function JudgeConsole() {
                 </button>
                 <button
                   disabled={!canEmit}
-                  onClick={confirmClear}
+                  onClick={() => {
+                    if (pendingPadId == null) return;
+                    const newPad = pads.find((x) => x.id === pendingPadId);
+                    if (!newPad) return;
+                    setLockedPadId(pendingPadId);
+                    try {
+                      localStorage.setItem(JUDGE_PAD_STORAGE_KEY, String(pendingPadId));
+                    } catch {
+                      /* ignore */
+                    }
+                    socket?.emit?.("judge:area:set", { padId: pendingPadId });
+                    setShowConfirmChangeArea(false);
+                    setPendingPadId(null);
+                  }}
                   style={buttonStyle({
-                    bg: COLOR_RED,
+                    bg: "var(--info)",
                     fg: "white",
                     disabled: !canEmit,
                   })}
                 >
-                  Yes, CLEAR
+                  Confirm Change
                 </button>
               </div>
             </div>

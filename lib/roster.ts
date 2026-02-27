@@ -145,5 +145,14 @@ export function buildStateFromRosterCsv(csvPath?: string): BoardState | null {
   });
 
   const nextPadId = (pads.length > 0 ? Math.max(...pads.map((p) => p.id)) : 0) + 1;
-  return { pads, updatedAt: now, nextPadId };
+  return {
+    pads,
+    updatedAt: now,
+    nextPadId,
+    eventStatus: "PLANNING" as const,
+    eventStartAt: null,
+    eventPaused: false,
+    eventPausedAt: null,
+    eventPausedAccumMs: 0,
+  };
 }

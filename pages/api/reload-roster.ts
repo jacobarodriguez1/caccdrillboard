@@ -27,6 +27,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       nextState.schedule = prev.schedule ?? [];
       nextState.scheduleUpdatedAt = prev.scheduleUpdatedAt ?? Date.now();
       (nextState as any).eventHeaderLabel = (prev as any).eventHeaderLabel ?? "COMPETITION MATRIX";
+      const wasLive = (prev as any)?.eventStatus === "LIVE";
+      (nextState as any).eventStatus = wasLive ? "LIVE" : "PLANNING";
+      (nextState as any).eventStartAt = (prev as any)?.eventStartAt ?? null;
+      (nextState as any).eventPaused = (prev as any)?.eventPaused ?? false;
+      (nextState as any).eventPausedAt = (prev as any)?.eventPausedAt ?? null;
+      (nextState as any).eventPausedAccumMs = (prev as any)?.eventPausedAccumMs ?? 0;
+    } else {
+      (nextState as any).eventStatus = "PLANNING";
+      (nextState as any).eventStartAt = null;
+      (nextState as any).eventPaused = false;
+      (nextState as any).eventPausedAt = null;
+      (nextState as any).eventPausedAccumMs = 0;
     }
 
     G.boardState = nextState;

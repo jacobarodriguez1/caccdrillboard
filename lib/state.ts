@@ -82,9 +82,20 @@ export type CycleStats = {
   updatedAt: number;
 };
 
+export type EventStatus = "PLANNING" | "LIVE";
+
 export type BoardState = {
 
   eventHeaderLabel?: string;
+
+  /** Event lifecycle: PLANNING = no report timers; LIVE = competition running */
+  eventStatus?: EventStatus;
+  /** Scheduled start time (ms UTC) or null; when set and now >= this, can auto-transition to LIVE */
+  eventStartAt?: number | null;
+  /** When LIVE, pause freezes competition clocks */
+  eventPaused?: boolean;
+  eventPausedAt?: number | null;
+  eventPausedAccumMs?: number;
 
   /** Dynamic list of competition areas (pads/classrooms/training stations/etc.) */
   pads: Pad[];
@@ -194,5 +205,28 @@ export function createInitialState(): BoardState {
     avgCycleSecondsByPad: {},
 
     eventHeaderLabel: "COMPETITION MATRIX",
+
+    eventStatus: "PLANNING",
+    eventStartAt: null,
+    eventPaused: false,
+    eventPausedAt: null,
+    eventPausedAccumMs: 0,
   };
+}
+
+/**
+ * Effective competition time for countdowns/timers.
+ * When LIVE and paused: frozen at pause moment.
+ * When LIVE and not paused: real time minus accumulated pause duration.
+ */
+export function getCompetitionNowMs(
+  state: BoardState | null,
+  realNowMs: number
+): number | null {
+  if (!state || state.eventStatus !== "LIVE") return null;
+  const accum = state.eventPausedAccumMs ?? 0;
+  if (state.eventPaused && state.eventPausedAt != null) {
+    return state.eventPausedAt - accum;
+  }
+  return realNowMs - accum;
 }

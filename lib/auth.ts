@@ -19,7 +19,7 @@ function getSessionSecret(): string {
 }
 
 /** Create HMAC-signed role payload. Format: base64url(payload).base64url(signature) */
-function signRolePayload(role: SocketRole): string {
+export function signRolePayload(role: SocketRole): string {
   const exp = Math.floor(Date.now() / 1000) + ROLE_COOKIE_MAX_AGE_SEC;
   const payload = JSON.stringify({ r: role, exp });
   const secret = getSessionSecret();
@@ -78,30 +78,31 @@ export function setRoleCookie(
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
-export function requireAdmin(ctx: GetServerSidePropsContext) {
-  const cookie = parseCookie(ctx.req.headers.cookie);
-  const authed = cookie["cacc_admin"] === "1";
-
-  if (!authed) {
-    return {
-      redirect: {
-        destination: "/login",
-        permanent: false,
-      },
-    } as const;
-  }
-
-  return { props: {} } as const;
-}
-
-/** requireAdmin + set signed cacc_role for Socket.IO. Use for admin/judge pages. */
+/** Check auth and role. Redirects to appropriate login if not authorized. */
 export function requireAdminRole(
   ctx: GetServerSidePropsContext,
-  role: "admin" | "judge"
+  requiredRole: "admin" | "judge"
 ): GetServerSidePropsResult<Record<string, never>> {
-  const result = requireAdmin(ctx);
-  if ("redirect" in result) return result;
-  // Only set signed cookie; never trust raw cacc_role from request
+  const cookie = parseCookie(ctx.req.headers.cookie);
+  const signedRole = cookie["cacc_role"];
+  const role = signedRole ? verifyRoleCookie(signedRole) : null;
+
+  if (!role) {
+    const dest = requiredRole === "admin" ? "/admin/login" : "/judge/login";
+    return { redirect: { destination: dest, permanent: false } } as const;
+  }
+
+  // Admin page: only role=admin allowed. Judge trying to access /admin → redirect.
+  if (requiredRole === "admin" && role !== "admin") {
+    return { redirect: { destination: "/admin/login", permanent: false } } as const;
+  }
+
+  // Judge page: role=judge or admin allowed (admin can access judge for testing)
+  if (requiredRole === "judge" && role !== "judge" && role !== "admin") {
+    return { redirect: { destination: "/judge/login", permanent: false } } as const;
+  }
+
+  // Ensure cacc_role is set for Socket.IO (refresh if expired; role already verified)
   setRoleCookie(ctx.res, role);
-  return result;
+  return { props: {} } as const;
 }

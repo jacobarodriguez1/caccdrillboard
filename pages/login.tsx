@@ -1,35 +1,8 @@
-// pages/login.tsx
+// pages/login.tsx — Role chooser (no passwords)
 import Head from "next/head";
-import { useState } from "react";
+import Link from "next/link";
 
 export default function LoginPage() {
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function submit() {
-    setBusy(true);
-    setErr(null);
-    try {
-      const r = await fetch("/api/admin-login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setErr(data?.error ?? "Login failed.");
-        setBusy(false);
-        return;
-      }
-      window.location.href = "/admin";
-    } catch {
-      setErr("Network error.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <>
       <Head>
@@ -54,58 +27,60 @@ export default function LoginPage() {
             borderRadius: 18,
             background: "rgba(255,255,255,0.06)",
             border: "1px solid rgba(255,255,255,0.12)",
-            padding: 18,
+            padding: 24,
             boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
           }}
         >
-          <div style={{ fontSize: 20, fontWeight: 1000 }}>Admin / Judge Login</div>
+          <div style={{ fontSize: 20, fontWeight: 1000 }}>Competition Matrix</div>
           <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>
-            Enter the admin password to access Judge/Admin consoles.
+            Choose your console to sign in.
           </div>
 
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            type="password"
-            placeholder="Password"
+          <div
             style={{
-              marginTop: 14,
-              width: "100%",
-              padding: "12px 14px",
-              minHeight: 44,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.18)",
-              background: "rgba(0,0,0,0.25)",
-              color: "white",
-              outline: "none",
-              fontSize: 16,
-            }}
-          />
-
-          {err ? <div style={{ marginTop: 10, color: "#ffb4b4", fontWeight: 900 }}>{err}</div> : null}
-
-          <button
-            onClick={submit}
-            disabled={busy || !password}
-            style={{
-              marginTop: 14,
-              width: "100%",
-              padding: "12px 14px",
-              minHeight: 44,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.18)",
-              background: "var(--cacc-gold)",
-              color: "#111",
-              fontWeight: 1000,
-              cursor: busy ? "not-allowed" : "pointer",
-              opacity: busy || !password ? 0.6 : 1,
+              marginTop: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
             }}
           >
-            {busy ? "Signing in…" : "Sign In"}
-          </button>
+            <Link
+              href="/admin/login"
+              style={{
+                display: "block",
+                padding: "14px 18px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(0,0,0,0.25)",
+                color: "white",
+                fontWeight: 1000,
+                textAlign: "center",
+                textDecoration: "none",
+              }}
+            >
+              Admin Console
+            </Link>
+            <Link
+              href="/judge/login"
+              style={{
+                display: "block",
+                padding: "14px 18px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "var(--cacc-gold)",
+                color: "#111",
+                fontWeight: 1000,
+                textAlign: "center",
+                textDecoration: "none",
+              }}
+            >
+              Judge Console
+            </Link>
+          </div>
 
-          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.75 }}>
-            Tip: set <code>ADMIN_PASSWORD</code> in <code>.env.local</code>
+          <div style={{ marginTop: 16, fontSize: 12, opacity: 0.75 }}>
+            Set <code>ADMIN_PASSWORD</code> and <code>JUDGE_PASSWORD</code> in{" "}
+            <code>.env.local</code>
           </div>
         </div>
       </main>

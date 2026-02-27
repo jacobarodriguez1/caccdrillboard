@@ -156,6 +156,34 @@ function getPadById(padId: number | null | undefined): Pad | null {
   return s.pads.find((p: Pad) => p.id === padId) ?? null;
 }
 
+/** Gate judge pad actions: returns padId if allowed, null if rejected. Emits judge:error on reject. */
+function judgePadGate(socket: any, payload: any): number | null {
+  const sid = socket?.id ?? "?";
+  const assigned = socket?.data?.assignedPadId;
+  const payloadPadId = payload?.padId ?? payload?.id ?? payload?.pad;
+
+  if (socket?.data?.role !== "judge") {
+    console.warn("[GATE REJECT]", sid, "role !== judge", { assigned, payloadPadId });
+    return null;
+  }
+  if (assigned == null || !Number.isFinite(assigned)) {
+    console.warn("[GATE REJECT]", sid, "no judging area selected", { assigned, payloadPadId });
+    socket.emit?.("judge:error", { message: "No judging area selected" });
+    return null;
+  }
+  const target = resolvePadId(payload);
+  if (target == null) {
+    console.warn("[GATE REJECT]", sid, "no padId in payload", { assigned, payloadPadId });
+    return null;
+  }
+  if (target !== assigned) {
+    console.warn("[GATE REJECT]", sid, "padId mismatch", { assigned, target, payloadPadId });
+    socket.emit?.("judge:error", { message: "Action not permitted for this area" });
+    return null;
+  }
+  return target;
+}
+
 function recomputeNextPadId(state: BoardState) {
   const maxId = (state.pads ?? []).reduce((m, p) => Math.max(m, Number(p.id) || 0), 0);
   state.nextPadId = Math.max(state.nextPadId ?? 1, maxId + 1);
@@ -227,6 +255,39 @@ function skipOnDeck(pad: Pad, nowMs: number) {
   pad.onDeck = nextOnDeck;
   pad.standby = [...nextStandby, moved];
   pad.updatedAt = nowMs;
+}
+
+/** Skip current NOW team: move to end of standby, promote ON DECK (or standby[0]) to NOW. */
+function skipNow(pad: Pad, nowMs: number): boolean {
+  if (!pad.now) return false;
+  const standby = pad.standby ?? [];
+  const promoted = pad.onDeck ?? (standby.length > 0 ? standby[0] : null);
+  if (!promoted) return false; // nothing to promote
+
+  const moved = pad.now;
+  (moved as any).tag = "SKIPPED";
+
+  let nextOnDeck: Team | null;
+  let nextStandby: Team[];
+  if (pad.onDeck) {
+    nextOnDeck = standby.length > 0 ? standby[0] : null;
+    nextStandby = standby.length > 0 ? standby.slice(1) : [];
+  } else {
+    nextOnDeck = standby.length > 1 ? standby[1] : null;
+    nextStandby = standby.length > 1 ? standby.slice(2) : [];
+  }
+
+  pad.now = promoted;
+  pad.onDeck = nextOnDeck;
+  pad.standby = [...nextStandby, moved];
+  pad.breakUntilAt = null;
+  pad.breakReason = null;
+  pad.breakStartAt = null;
+  pad.updatedAt = nowMs;
+
+  clearArrivalForNow(pad);
+  startReportTimerForNow(pad, nowMs);
+  return true;
 }
 
 function clearPad(pad: Pad, nowMs: number) {
@@ -316,6 +377,12 @@ function sanitizeStateAfterAnyLoad(state: BoardState) {
 
   (state as any).eventHeaderLabel = (state as any).eventHeaderLabel ?? "COMPETITION MATRIX";
 
+  (state as any).eventStatus = (state as any).eventStatus ?? "PLANNING";
+  (state as any).eventStartAt = (state as any).eventStartAt ?? null;
+  (state as any).eventPaused = (state as any).eventPaused ?? false;
+  (state as any).eventPausedAt = (state as any).eventPausedAt ?? null;
+  (state as any).eventPausedAccumMs = (state as any).eventPausedAccumMs ?? 0;
+
   state.schedule = normalizeSchedule(state.schedule);
   state.scheduleUpdatedAt = state.scheduleUpdatedAt ?? nowMs;
 
@@ -351,7 +418,9 @@ function sanitizeStateAfterAnyLoad(state: BoardState) {
 
     const breakActive = !!p.breakUntilAt && p.breakUntilAt > nowMs;
 
-    if (!breakActive && p.now && !p.reportByDeadlineAt && !isArrivedForNow(p)) {
+    // Only start report timer when event is LIVE; in PLANNING, never auto-start (root cause fix)
+    const isLive = (state as any).eventStatus === "LIVE";
+    if (isLive && !breakActive && p.now && !p.reportByDeadlineAt && !isArrivedForNow(p)) {
       startReportTimerForNow(p, nowMs);
     }
 
@@ -367,13 +436,14 @@ function sanitizeStateAfterAnyLoad(state: BoardState) {
 }
 
 /** ---------- participant insertion helper ---------- */
-function insertTeamIntoPad(pad: Pad, nowMs: number, where: "NOW" | "ONDECK" | "END", team: Team) {
+function insertTeamIntoPad(pad: Pad, nowMs: number, where: "NOW" | "ONDECK" | "END", team: Team, state?: BoardState) {
   if (where === "NOW") {
     if (pad.onDeck) pad.standby.unshift(pad.onDeck);
     if (pad.now) pad.onDeck = pad.now;
     pad.now = team;
     clearArrivalForNow(pad);
-    startReportTimerForNow(pad, nowMs);
+    const isLive = (state ?? G.boardState) && ((state ?? G.boardState) as any).eventStatus === "LIVE";
+    if (isLive) startReportTimerForNow(pad, nowMs);
     return;
   }
 
@@ -493,23 +563,19 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
     loadCommChannelsIfNeeded();
 
-    // Derive role from HMAC-signed cookie. Invalid/missing → public. Allow all to connect.
+    // Derive role from server-verified cacc_role cookie only. Never trust client inputs.
     io.use((socket, next) => {
       const cookieHeader = socket.handshake.headers.cookie;
       const cookies = parseCookie(cookieHeader);
       const signedValue = cookies["cacc_role"] ?? "";
-      const authed = cookies["cacc_admin"] === "1";
-
       const role = verifyRoleCookie(signedValue);
-      // admin/judge require valid signed cookie AND cacc_admin=1
-      if (role === "admin" && authed) {
-        (socket as any).data = (socket as any).data ?? {};
+
+      (socket as any).data = (socket as any).data ?? {};
+      if (role === "admin") {
         (socket as any).data.role = "admin";
-      } else if (role === "judge" && authed) {
-        (socket as any).data = (socket as any).data ?? {};
+      } else if (role === "judge") {
         (socket as any).data.role = "judge";
       } else {
-        (socket as any).data = (socket as any).data ?? {};
         (socket as any).data.role = "public";
       }
       next();
@@ -517,7 +583,17 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
     const emitState = () => {
       loadStateIfNeeded();
-      sanitizeStateAfterAnyLoad(G.boardState as BoardState);
+      const state = G.boardState as BoardState;
+      const nowMs = Date.now();
+      const eventStatus = (state as any).eventStatus ?? "PLANNING";
+      const eventStartAt = (state as any).eventStartAt;
+      if (eventStatus === "PLANNING" && typeof eventStartAt === "number" && Number.isFinite(eventStartAt) && nowMs >= eventStartAt) {
+        (state as any).eventStatus = "LIVE";
+        (state as any).eventStartAt = nowMs;
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "EVENT_START", detail: "Event auto-started (scheduled time reached)." });
+      }
+      sanitizeStateAfterAnyLoad(state);
       ensureChannelsForPads();
       io.emit("state", G.boardState);
       io.emit("audit", G.audit);
@@ -578,6 +654,15 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
             built.scheduleUpdatedAt = prev.scheduleUpdatedAt ?? nowMs;
             (built as any).eventHeaderLabel = (prev as any).eventHeaderLabel ?? "COMPETITION MATRIX";
 
+            // Roster load: set PLANNING so report timers do not start (unless event already LIVE)
+            // If event is LIVE, do NOT flip to PLANNING on roster reload
+            const wasLive = (prev as any)?.eventStatus === "LIVE";
+            (built as any).eventStatus = wasLive ? "LIVE" : "PLANNING";
+            (built as any).eventStartAt = (prev as any)?.eventStartAt ?? null;
+            (built as any).eventPaused = (prev as any)?.eventPaused ?? false;
+            (built as any).eventPausedAt = (prev as any)?.eventPausedAt ?? null;
+            (built as any).eventPausedAccumMs = (prev as any)?.eventPausedAccumMs ?? 0;
+
             G.boardState = built;
             G.rosterLoaded = true;
 
@@ -601,6 +686,47 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       };
 
       // =========================
+      // JUDGE: AREA ASSIGNMENT (must precede pad actions)
+      // =========================
+      socket.on("judge:area:set", (payload: any, ack?: (res: { ok: boolean; assignedPadId?: number; error?: string }) => void) => {
+        const sendAck = (ok: boolean, assignedPadId?: number, error?: string) => {
+          try {
+            ack?.({ ok, assignedPadId, error });
+          } catch {}
+        };
+
+        if ((socket as any).data?.role !== "judge") {
+          sendAck(false, undefined, "Not a judge");
+          return;
+        }
+        const padIdRaw = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
+        if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw)) {
+          sendAck(false, undefined, "Invalid padId");
+          return;
+        }
+        const pad = getPadById(padIdRaw);
+        if (!pad) {
+          sendAck(false, undefined, "Pad not found");
+          return;
+        }
+
+        const prevPadId = (socket as any).data?.assignedPadId;
+        (socket as any).data.assignedPadId = padIdRaw;
+
+        const nowMs = Date.now();
+        if (prevPadId != null && prevPadId !== padIdRaw) {
+          pushAudit({
+            ts: nowMs,
+            padId: padIdRaw,
+            action: "JUDGE_AREA_CHANGE",
+            detail: `Judge changed area: ${prevPadId} → ${padIdRaw}`,
+          });
+        }
+
+        sendAck(true, padIdRaw);
+      });
+
+      // =========================
       // COMM: REGISTER (admin only) / JOIN PAD (judge)
       // =========================
       socket.on("comm:register", (payload: any) => {
@@ -620,6 +746,8 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         const nowMs = Date.now();
         const padIdRaw = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;
         if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
+        const assigned = (socket as any).data?.assignedPadId;
+        if (assigned == null || assigned !== padIdRaw) return; // Judge can only join assigned pad
         const padId = padIdRaw;
 
         const padViewers = G.commPadViewers as Map<number, Set<string>>;
@@ -660,10 +788,13 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       socket.on("comm:presence", (payload: any) => {
         if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
+        const assigned = (socket as any).data?.assignedPadId;
+        if (assigned == null || !Number.isFinite(assigned)) return;
         const nowMs = Date.now();
         const rec = G.commJudges.get(socket.id);
         if (!rec) return;
         const padId = payload?.padId != null ? Number(payload.padId) : null;
+        if (padId != null && padId !== assigned) return; // Judge can only send presence for assigned pad
         const name = payload?.name != null ? String(payload.name).trim() : null;
         rec.lastSeenAt = nowMs;
         if (typeof padId === "number" && Number.isFinite(padId)) rec.padId = Math.floor(padId);
@@ -695,7 +826,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         ensureGlobals();
         const text = String(payload?.text ?? "").trim();
         if (!text) return;
-        const padIdRaw = (socket as any).data?.padId;
+        const padIdRaw = (socket as any).data?.assignedPadId;
         if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
         const padId = padIdRaw;
 
@@ -717,7 +848,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       socket.on("judge:comm:ack", (payload: any) => {
         if ((socket as any).data?.role !== "judge") return;
         ensureGlobals();
-        const padIdRaw = (socket as any).data?.padId;
+        const padIdRaw = (socket as any).data?.assignedPadId;
         if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
         const padId = padIdRaw;
 
@@ -850,6 +981,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         resetQueues?: boolean;
         preservePads?: boolean;
         resetHeaderLabel?: boolean;
+        clearAreas?: boolean;
       };
       type ResetAck = (arg: { ok: boolean; error?: string }) => void;
       socket.on("admin:event:reset", (payload: ResetScope | undefined, ack?: ResetAck) => {
@@ -880,6 +1012,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
             resetQueues: payload?.resetQueues === true,
             preservePads: payload?.preservePads !== false,
             resetHeaderLabel: payload?.resetHeaderLabel === true,
+            clearAreas: payload?.clearAreas === true,
           };
 
           const nowMs = Date.now();
@@ -937,6 +1070,18 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         // D) resetHeaderLabel (default false)
         if (scope.resetHeaderLabel) {
           st.eventHeaderLabel = "COMPETITION MATRIX";
+        }
+
+        // E) clearAreas (default false) — delete ALL pads
+        if (scope.clearAreas) {
+          st.pads = [];
+          st.nextPadId = 1;
+          if (st.schedule && Array.isArray(st.schedule)) {
+            st.schedule = st.schedule.filter((e) => e?.scope !== "PAD");
+          }
+          G.commChannels = {} as Record<number, ChatMessage[]>;
+          G.commPadViewers = new Map<number, Set<string>>();
+          scheduleCommPersist();
         }
 
         // Add audit entry for the reset (after clearing audit if applicable)
@@ -1034,22 +1179,55 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // =========================
       // ADMIN: CLEAR ALL QUEUES (hard reset)
       // =========================
-      socket.on("admin:clearAllQueues", () => {
-        if ((socket as any).data?.role !== "admin") return;
+      socket.on("admin:clearAllQueues", (payload?: { clearAreas?: boolean }, ack?: (arg: { ok?: boolean; error?: string }) => void) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
         const nowMs = Date.now();
         const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
 
-        (state.pads ?? []).forEach((p) => clearPad(p, nowMs));
-        state.updatedAt = nowMs;
+        try {
+          (state.pads ?? []).forEach((p) => clearPad(p, nowMs));
+          state.updatedAt = nowMs;
 
-        pushAudit({
-          ts: nowMs,
-          padId: null,
-          action: "CLEAR_ALL",
-          detail: "Cleared all queues across all areas.",
-        });
+          const clearAreas = payload?.clearAreas === true;
+          if (clearAreas) {
+            state.pads = [];
+            state.nextPadId = 1;
+            if (state.schedule && Array.isArray(state.schedule)) {
+              state.schedule = state.schedule.filter((e) => e?.scope !== "PAD");
+            }
+            G.commChannels = {} as Record<number, ChatMessage[]>;
+            G.commPadViewers = new Map<number, Set<string>>();
+            scheduleCommPersist();
+          }
 
-        emitState();
+          pushAudit({
+            ts: nowMs,
+            padId: null,
+            action: "CLEAR_ALL",
+            detail: clearAreas
+              ? "Cleared all queues and deleted all areas."
+              : "Cleared all queues across all areas.",
+          });
+
+          emitState();
+          if (clearAreas) emitComm(io);
+          sendAck(true);
+        } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          sendAck(false, err);
+        }
       });
 
       // =========================
@@ -1068,6 +1246,155 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
           return;
         }
         doLoadRoster(ack);
+      });
+
+      // =========================
+      // ADMIN: EVENT START GATE (schedule / start now / set planning)
+      // =========================
+      type EventAck = (arg: { ok: boolean; error?: string }) => void;
+      socket.on("admin:event:scheduleStart", (payload: { startAt?: number }, ack?: EventAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
+        const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
+        const startAt = typeof payload?.startAt === "number" && Number.isFinite(payload.startAt) ? payload.startAt : null;
+        (state as any).eventStartAt = startAt;
+        (state as any).eventStatus = "PLANNING";
+        state.updatedAt = Date.now();
+        pushAudit({ ts: state.updatedAt, padId: null, action: "EVENT_SCHEDULE", detail: startAt ? `Scheduled start at ${new Date(startAt).toISOString()}` : "Cleared scheduled start." });
+        emitState();
+        sendAck(true);
+      });
+      socket.on("admin:event:startNow", (_payload: unknown, ack?: EventAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
+        const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
+        const nowMs = Date.now();
+        (state as any).eventStatus = "LIVE";
+        (state as any).eventStartAt = nowMs;
+        (state as any).eventPaused = false;
+        (state as any).eventPausedAt = null;
+        (state as any).eventPausedAccumMs = 0;
+        state.updatedAt = nowMs;
+        sanitizeStateAfterAnyLoad(state);
+        pushAudit({ ts: nowMs, padId: null, action: "EVENT_START", detail: "Event started (LIVE)." });
+        emitState();
+        sendAck(true);
+      });
+      socket.on("admin:event:setPlanning", (_payload: unknown, ack?: EventAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
+        const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
+        const nowMs = Date.now();
+        (state as any).eventStatus = "PLANNING";
+        state.updatedAt = nowMs;
+        for (const p of state.pads ?? []) {
+          p.reportByDeadlineAt = null;
+          p.reportByTeamId = null;
+          if (p.now && !(p as any).nowArrivedAt) p.status = "IDLE";
+        }
+        pushAudit({ ts: nowMs, padId: null, action: "EVENT_PLANNING", detail: "Event set to PLANNING." });
+        emitState();
+        sendAck(true);
+      });
+
+      socket.on("admin:event:pause", (_payload: unknown, ack?: EventAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
+        const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
+        if ((state as any).eventStatus !== "LIVE") {
+          sendAck(true);
+          return;
+        }
+        if ((state as any).eventPaused) {
+          sendAck(true);
+          return;
+        }
+        const nowMs = Date.now();
+        (state as any).eventPaused = true;
+        (state as any).eventPausedAt = nowMs;
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "EVENT_PAUSE", detail: "Competition paused." });
+        emitState();
+        sendAck(true);
+      });
+
+      socket.on("admin:event:resume", (_payload: unknown, ack?: EventAck) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+        if ((socket as any).data?.role !== "admin") {
+          sendAck(false, "Not authorized");
+          return;
+        }
+        const state = G.boardState as BoardState;
+        if (!state) {
+          sendAck(false, "No board state");
+          return;
+        }
+        if ((state as any).eventStatus !== "LIVE") {
+          sendAck(true);
+          return;
+        }
+        if (!(state as any).eventPaused) {
+          sendAck(true);
+          return;
+        }
+        const nowMs = Date.now();
+        const pausedAt = (state as any).eventPausedAt ?? nowMs;
+        const delta = nowMs - pausedAt;
+        (state as any).eventPausedAccumMs = ((state as any).eventPausedAccumMs ?? 0) + delta;
+        (state as any).eventPaused = false;
+        (state as any).eventPausedAt = null;
+        state.updatedAt = nowMs;
+        pushAudit({ ts: nowMs, padId: null, action: "EVENT_RESUME", detail: "Competition resumed." });
+        emitState();
+        sendAck(true);
       });
 
       // =========================
@@ -1333,8 +1660,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       // JUDGE EVENTS (unchanged)
       // =========================
       socket.on("judge:complete", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const state = G.boardState as BoardState;
@@ -1388,8 +1714,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:hold", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1407,8 +1732,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:dns", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1441,8 +1765,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:undo", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1454,7 +1777,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:arrived", (payload: any) => {
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1470,8 +1793,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:swap", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1486,25 +1808,67 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         emitState();
       });
 
-      socket.on("judge:skipOnDeck", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
-        if (padId == null) return;
+      socket.on("judge:skipNow", (payload: any, ack?: (res: { ok: boolean; error?: string }) => void) => {
+        const sendAck = (ok: boolean, error?: string) => {
+          try {
+            ack?.({ ok, error });
+          } catch {}
+        };
+
+        const assignedPadId = (socket as any).data?.assignedPadId;
+        const requestedPadId = payload?.padId ?? payload?.id ?? payload?.pad;
+        const padId = judgePadGate(socket, payload);
+
+        console.log("[judge:skipNow] assignedPadId=", assignedPadId, "requestedPadId=", requestedPadId, "resolvedPadId=", padId);
+
+        if (padId == null) {
+          const err = "Not assigned to this pad or no judging area selected.";
+          socket.emit?.("judge:error", { message: err });
+          sendAck(false, err);
+          return;
+        }
 
         const nowMs = Date.now();
         const pad = getPadById(padId);
-        if (!pad) return;
+        if (!pad) {
+          const err = "Pad not found.";
+          sendAck(false, err);
+          return;
+        }
+
+        console.log("[judge:skipNow] BEFORE: now=", pad.now?.id ?? null, "onDeck=", pad.onDeck?.id ?? null, "standbyLen=", (pad.standby ?? []).length);
+
+        if (!pad.now) {
+          const err = "No team on pad to skip.";
+          socket.emit?.("judge:error", { message: err });
+          sendAck(false, err);
+          return;
+        }
+        if (!pad.onDeck && (pad.standby?.length ?? 0) === 0) {
+          const err = "Nothing to promote; cannot skip.";
+          socket.emit?.("judge:error", { message: err });
+          sendAck(false, err);
+          return;
+        }
 
         snapshotForUndo(padId);
-        skipOnDeck(pad, nowMs);
+        const ok = skipNow(pad, nowMs);
         (G.boardState as BoardState).updatedAt = nowMs;
 
-        pushAudit({ ts: nowMs, padId, action: "SKIP_ON_DECK", detail: "Moved ONDECK to standby end." });
+        console.log("[judge:skipNow] AFTER ok=", ok, "now=", pad.now?.id ?? null, "onDeck=", pad.onDeck?.id ?? null, "standbyLen=", (pad.standby ?? []).length);
+
+        if (!ok) {
+          sendAck(false, "Skip failed.");
+          return;
+        }
+
+        pushAudit({ ts: nowMs, padId, action: "SKIP", detail: "Skipped NOW team to standby end." });
         emitState();
+        sendAck(true);
       });
 
       socket.on("judge:clear", (payload: any) => {
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1520,8 +1884,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:startBreak", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const state = G.boardState as BoardState;
@@ -1563,8 +1926,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:endBreak", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1598,8 +1960,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:addTeam", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();
@@ -1632,8 +1993,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:setPadLabel", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
-        const padId = resolvePadId(payload);
+        const padId = judgePadGate(socket, payload);
         if (padId == null) return;
 
         const nowMs = Date.now();

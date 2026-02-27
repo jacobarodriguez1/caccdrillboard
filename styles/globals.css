@@ -235,3 +235,56 @@ a {
 .flash {
   animation: flash 1s infinite;
 }
+
+/* =========================
+   DateTimeField (dt-wrap / dt-input / dt-btn)
+   ========================= */
+/* Hide native WebKit calendar indicator */
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  opacity: 0;
+}
+
+.dt-wrap {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dt-input {
+  width: 100%;
+  padding-right: 44px; /* space for icon button */
+  cursor: pointer;
+}
+
+.dt-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 28px;
+  width: 28px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 215, 64, 0.95); /* CACC gold */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.95;
+}
+
+.dt-btn:hover {
+  opacity: 1;
+}
+
+.dt-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Inline context (e.g. flex row) - don't stretch */
+.dt-wrap.dt-wrap-inline {
+  width: fit-content;
+}
