@@ -156,14 +156,19 @@ function getPadById(padId: number | null | undefined): Pad | null {
   return s.pads.find((p: Pad) => p.id === padId) ?? null;
 }
 
+/** Returns true for roles that are allowed to perform judge pad actions. */
+function isJudgeRole(role: string | undefined): boolean {
+  return role === "judge" || role === "admin";
+}
+
 /** Gate judge pad actions: returns padId if allowed, null if rejected. Emits judge:error on reject. */
 function judgePadGate(socket: any, payload: any): number | null {
   const sid = socket?.id ?? "?";
   const assigned = socket?.data?.assignedPadId;
   const payloadPadId = payload?.padId ?? payload?.id ?? payload?.pad;
 
-  if (socket?.data?.role !== "judge") {
-    console.warn("[GATE REJECT]", sid, "role !== judge", { assigned, payloadPadId });
+  if (!isJudgeRole((socket as any)?.data?.role)) {
+    console.warn("[GATE REJECT]", sid, "role not judge/admin", { role: (socket as any)?.data?.role, assigned, payloadPadId });
     return null;
   }
   if (assigned == null || !Number.isFinite(assigned)) {
@@ -750,7 +755,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("comm:joinPad", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
+        if (!isJudgeRole((socket as any).data?.role)) return;
         ensureGlobals();
         ensureChannelsForPads();
         const nowMs = Date.now();
@@ -796,7 +801,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("comm:presence", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
+        if (!isJudgeRole((socket as any).data?.role)) return;
         ensureGlobals();
         const assigned = (socket as any).data?.assignedPadId;
         if (assigned == null || !Number.isFinite(assigned)) return;
@@ -832,7 +837,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
       // judge -> current pad channel (reply auto-acks latest unacked urgent for that pad)
       socket.on("judge:comm:send", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
+        if (!isJudgeRole((socket as any).data?.role)) return;
         ensureGlobals();
         const text = String(payload?.text ?? "").trim();
         if (!text) return;
@@ -856,7 +861,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
       // judge acknowledges urgent message (only for pad they are joined to)
       socket.on("judge:comm:ack", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
+        if (!isJudgeRole((socket as any).data?.role)) return;
         ensureGlobals();
         const padIdRaw = (socket as any).data?.assignedPadId;
         if (typeof padIdRaw !== "number" || !Number.isFinite(padIdRaw) || !getPadById(padIdRaw)) return;
@@ -1758,7 +1763,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
       });
 
       socket.on("judge:dq", (payload: any) => {
-        if ((socket as any).data?.role !== "judge") return;
+        if (!isJudgeRole((socket as any).data?.role)) return;
         const padId = resolvePadId(payload);
         if (padId == null) return;
 
