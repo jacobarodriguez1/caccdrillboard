@@ -1323,7 +1323,7 @@ export default function AdminPage() {
                 }}
               >
                 <span style={chipStyle("rgba(0,0,0,0.25)", "white")}>
-                  EVENT STATUS
+                  COMPETITION STATUS
                 </span>
                 <span
                   style={chipStyle(
@@ -1333,8 +1333,13 @@ export default function AdminPage() {
                     "white",
                   )}
                 >
-                  {(state as any)?.eventStatus === "LIVE" ? "LIVE" : "PLANNING"}
+                  {(state as any)?.eventStatus === "LIVE" ? "RUNNING" : "PLANNING"}
                 </span>
+                {(state as any)?.eventStatus === "LIVE" && (state as any)?.eventPaused ? (
+                  <span style={chipStyle("rgba(255,152,0,0.75)", "white")}>
+                    PAUSED
+                  </span>
+                ) : null}
                 {(state as any)?.eventStatus === "PLANNING" ? (
                   <button
                     disabled={!canAct}
@@ -1387,7 +1392,7 @@ export default function AdminPage() {
                       opacity: canAct ? 1 : 0.5,
                     }}
                   >
-                    Resume Event
+                    Resume Clocks
                   </button>
                 ) : (
                   <button
@@ -1419,7 +1424,7 @@ export default function AdminPage() {
                       opacity: canAct ? 1 : 0.5,
                     }}
                   >
-                    Pause Event
+                    Pause Clocks
                   </button>
                 )}
               </div>
@@ -1436,7 +1441,13 @@ export default function AdminPage() {
                 </div>
               ) : null}
               <div style={{ marginTop: 4, fontSize: 11, opacity: 0.6 }}>
-                PLANNING: no report timers. Click Start Now to begin competition clocks.
+                {(state as any)?.eventStatus === "PLANNING"
+                  ? "Competition clocks are inactive. Start the event to enable reporting timers."
+                  : (state as any)?.eventStatus === "LIVE" && (state as any)?.eventPaused
+                    ? "Competition clocks are paused."
+                    : (state as any)?.eventStatus === "LIVE"
+                      ? "Competition clocks are running."
+                      : "Competition clocks are inactive. Start the event to enable reporting timers."}
               </div>
             </div>
           </div>
@@ -1456,7 +1467,7 @@ export default function AdminPage() {
                 connected ? "white" : "#111",
               )}
             >
-              {connected ? "LIVE" : "CONNECTING"}
+              {connected ? "CONNECTED" : "CONNECTING"}
             </span>
 
             <Link
@@ -1489,13 +1500,13 @@ export default function AdminPage() {
                 disabled: !canAct,
               })}
             >
-              Start New Event
+              Reset Event…
             </button>
           </div>
         </header>
 
         {/* =======================
-            Start New Event success / error toast
+            Reset Event success / error toast
            ======================= */}
         {resetSuccessMsg ? (
           <div
@@ -1522,7 +1533,7 @@ export default function AdminPage() {
               color: "#f48fb1",
             }}
           >
-            <b>Start New Event failed:</b> {resetErrorToast}
+            <b>Reset Event failed:</b> {resetErrorToast}
           </div>
         ) : null}
         {reloadRosterMsg ? (
@@ -3052,7 +3063,7 @@ export default function AdminPage() {
         )}
 
         {/* =======================
-            Start New Event confirm modal
+            Reset Event confirm modal
            ======================= */}
         {confirmStartNewEvent && (
           <div
@@ -3064,7 +3075,7 @@ export default function AdminPage() {
           >
             <div onClick={(e) => e.stopPropagation()} style={modalCard}>
               <div style={{ fontWeight: 1000, fontSize: 18 }}>
-                Start New Event?
+                Reset Event?
               </div>
               <div
                 style={{
@@ -3077,6 +3088,9 @@ export default function AdminPage() {
                 {resetScope.clearAreas
                   ? "This will clear Ops Chat and DELETE ALL training areas. This cannot be undone."
                   : "This will clear Ops Chat and (optionally) reset queues. This cannot be undone."}
+                <div style={{ marginTop: 8 }}>
+                  This resets selected data (chat/audit/queues/etc.). It does not change competition status unless you choose options that reset queues.
+                </div>
               </div>
 
               {resetError ? (
@@ -3232,7 +3246,7 @@ export default function AdminPage() {
                     disabled: !canAct,
                   })}
                 >
-                  Start New Event
+                  Reset Event
                 </button>
               </div>
             </div>

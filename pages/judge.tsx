@@ -814,7 +814,7 @@ export default function JudgeConsole() {
                 connected ? "white" : "#111",
               )}
             >
-              {connected ? "LIVE" : "CONNECTING"}
+              {connected ? "CONNECTED" : "CONNECTING"}
             </span>
 
             {lockedPadId != null && pad ? (

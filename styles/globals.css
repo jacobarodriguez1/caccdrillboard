@@ -37,6 +37,9 @@
   --danger: #c62828;
   --info: #1565c0;
 
+  /* Public board category accent (distinct from status colors) */
+  --category-accent: #a8b1c7;
+
   /* Neutrals */
   --gray-900: #1f2937;
   --gray-500: #6b7280;
@@ -93,10 +96,10 @@ body {
   }
 }
 
-/* Public board pad grid */
+/* Public board pad grid - scoreboard layout */
 .public-board-grid {
   display: grid;
-  gap: 14px;
+  gap: 24px;
 }
 @media (max-width: 640px) {
   .public-board-grid {
@@ -109,41 +112,24 @@ body {
   }
 }
 @media (min-width: 1025px) {
-  .public-board-grid:not(.public-board-grid-big) {
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  }
-  .public-board-grid.public-board-grid-big {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-@media (max-width: 640px) {
-  .public-board-grid.public-board-grid-big {
-    grid-template-columns: 1fr;
-  }
-}
-@media (min-width: 641px) and (max-width: 1024px) {
-  .public-board-grid.public-board-grid-big {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .public-board-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-/* Public board header */
+/* Public board header - event banner */
 @media (max-width: 640px) {
   .public-header {
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
+    text-align: center;
   }
   .public-header-logo {
-    width: 80px !important;
-    height: 80px !important;
-    align-self: center;
-  }
-  .public-header input[type="text"] {
-    width: 100% !important;
-    max-width: none !important;
+    width: 64px !important;
+    height: 64px !important;
   }
   .public-header-title {
-    font-size: clamp(20px, 5vw, 40px) !important;
+    font-size: clamp(20px, 5vw, 32px) !important;
   }
 }
 
@@ -234,6 +220,72 @@ a {
 /* Apply this class to any element you want to flash */
 .flash {
   animation: flash 1s infinite;
+}
+
+/* =========================
+   Public Board Scoreboard Animations
+   ========================= */
+@keyframes scoreboardTeamIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes scoreboardNowCompeting {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  15% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+  85% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+.public-scoreboard-team-in {
+  animation: scoreboardTeamIn 300ms ease-out forwards;
+}
+.public-scoreboard-now-competing {
+  animation: scoreboardNowCompeting 2s ease-out forwards;
+}
+
+/* LATE state - red flashing border and status */
+@keyframes lateFlashBorder {
+  0%,
+  100% {
+    border-color: #c62828;
+    box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.5);
+  }
+  50% {
+    border-color: rgba(198, 40, 40, 0.5);
+    box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.2);
+  }
+}
+@keyframes lateFlashStatus {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+.public-scoreboard-late-flash {
+  animation: lateFlashBorder 1s ease-in-out infinite;
+}
+.public-scoreboard-late-status {
+  animation: lateFlashStatus 1s ease-in-out infinite;
 }
 
 /* =========================

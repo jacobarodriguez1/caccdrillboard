@@ -314,6 +314,29 @@ function clearPad(pad: Pad, nowMs: number) {
   setStatus(pad, "IDLE", nowMs);
 }
 
+/** Clear break fields and resume pad into correct state. Used by judge:endBreak and auto-expiry. */
+function applyBreakEnded(pad: Pad, nowMs: number) {
+  pad.breakUntilAt = null;
+  pad.breakReason = null;
+  pad.breakStartAt = null;
+  pad.note = "";
+
+  if (isArrivedForNow(pad)) {
+    pad.reportByTeamId = null;
+    pad.reportByDeadlineAt = null;
+    setStatus(pad, "ON_PAD", nowMs);
+  } else if (pad.now) {
+    const nowId = pad.now.id;
+    const hasValidDeadline = !!pad.reportByDeadlineAt && !!pad.reportByTeamId && pad.reportByTeamId === nowId;
+    if (!hasValidDeadline) startReportTimerForNow(pad, nowMs);
+    else setStatus(pad, "REPORTING", nowMs);
+  } else {
+    pad.reportByTeamId = null;
+    pad.reportByDeadlineAt = null;
+    setStatus(pad, "IDLE", nowMs);
+  }
+}
+
 /** ---------- Soft ETA model ---------- */
 function updateCycleStats(state: BoardState, pad: Pad, durationSec: number, nowMs: number) {
   if (!state.cycleStatsByPad) state.cycleStatsByPad = {};
@@ -402,6 +425,10 @@ function sanitizeStateAfterAnyLoad(state: BoardState) {
     p.status = (p.status ?? (p.now ? "REPORTING" : "IDLE")) as PadStatus;
 
     p.breakUntilAt = p.breakUntilAt ?? null;
+    // Auto-end break when expired (no manual End Break required)
+    if (p.breakUntilAt != null && p.breakUntilAt <= nowMs) {
+      applyBreakEnded(p, nowMs);
+    }
     p.breakReason = p.breakReason ?? null;
     p.breakStartAt = p.breakStartAt ?? null;
 
@@ -1925,13 +1952,11 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
         pad.breakReason = reason;
         pad.note = `BREAK: ${reason}`;
 
-        if (pad.now?.id) {
-          pad.reportByTeamId = pad.now.id;
-          pad.reportByDeadlineAt = until;
-        } else {
-          pad.reportByTeamId = null;
-          pad.reportByDeadlineAt = null;
-        }
+        // Break pauses pad operations. Clear reporting deadline so when break
+        // ends (auto or manual) we start a fresh 5:00. Do NOT overwrite
+        // reportByDeadlineAt with break end time (that caused LATE on expiry).
+        pad.reportByTeamId = null;
+        pad.reportByDeadlineAt = null;
 
         setStatus(pad, "BREAK", nowMs);
         state.updatedAt = nowMs;
@@ -1950,24 +1975,7 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
 
         snapshotForUndo(padId);
 
-        pad.breakUntilAt = null;
-        pad.breakReason = null;
-        pad.note = "";
-
-        if (isArrivedForNow(pad)) {
-          pad.reportByTeamId = null;
-          pad.reportByDeadlineAt = null;
-          setStatus(pad, "ON_PAD", nowMs);
-        } else if (pad.now) {
-          const nowId = pad.now.id;
-          const hasValidDeadline = !!pad.reportByDeadlineAt && !!pad.reportByTeamId && pad.reportByTeamId === nowId;
-          if (!hasValidDeadline) startReportTimerForNow(pad, nowMs);
-          else setStatus(pad, "REPORTING", nowMs);
-        } else {
-          pad.reportByTeamId = null;
-          pad.reportByDeadlineAt = null;
-          setStatus(pad, "IDLE", nowMs);
-        }
+        applyBreakEnded(pad, nowMs);
 
         (G.boardState as BoardState).updatedAt = nowMs;
         pushAudit({ ts: nowMs, padId, action: "BREAK_END", detail: "Break ended" });

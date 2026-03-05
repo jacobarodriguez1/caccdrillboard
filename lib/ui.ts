@@ -12,6 +12,19 @@ export function mmssFromSeconds(totalSeconds: number) {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+/** Timer for public display: MM:SS or HH:MM:SS if >= 1 hour */
+export function formatTimerForDisplay(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  if (h >= 1) {
+    return `${h}:${String(mm).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  }
+  return `${mm}:${String(r).padStart(2, "0")}`;
+}
+
 export function safeEmit(socket: any, event: string, payload?: any) {
   try {
     socket?.emit?.(event, payload);

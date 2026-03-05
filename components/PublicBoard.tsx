@@ -4,70 +4,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { BoardState, Pad, Team, ScheduleEvent } from "@/lib/state";
 import { getCompetitionNowMs } from "@/lib/state";
 import { getSocket } from "@/lib/socketClient";
-import { fmtTime, mmssFromSeconds, chipStyle } from "@/lib/ui";
-import {
-  PadContainer,
-  PadHeader,
-  PadPrimarySection,
-  PadOnDeckSection,
-  PadStandbySection,
-} from "@/components/PadLayout";
+import { fmtTime, mmssFromSeconds, formatTimerForDisplay, chipStyle } from "@/lib/ui";
 
-/** ---------- Color tokens (explicit) ---------- */
-const COLOR_ORANGE = "rgba(255,152,0,0.95)"; // BREAK
-const COLOR_YELLOW = "rgba(255,235,59,0.95)"; // REPORT NOW
-const COLOR_RED = "var(--danger)"; // LATE
-const COLOR_BLUE = "var(--info)"; // ON PAD
+/** ---------- Color tokens (operational status) ---------- */
+const COLOR_ORANGE = "rgba(255,152,0,0.95)"; // AREA BREAK
+const COLOR_YELLOW = "rgba(255,235,59,0.95)"; // REPORTING
+const COLOR_RED = "var(--danger)"; // LATE – REPORT NOW
+const COLOR_BLUE = "var(--info)"; // ON NOW
+const COLOR_STANDBY = "rgba(255,255,255,0.45)"; // STANDBY dot
+const COLOR_CATEGORY = "#A8B1C7";
 
 /** ---------- Helpers ---------- */
-function areaName(p: Pad): string {
-  const n = String((p as any).name ?? "").trim();
-  return n.length ? n : `AREA ${p.id}`;
+/** School name only for public display (strip team ID, division, category) */
+function schoolNameForDisplay(t?: Team | null): string {
+  if (!t) return "—";
+  const name = String(t.name ?? "").trim();
+  if (!name) return "—";
+  return name.replace(/\s*\([^)]*\)\s*$/, "").trim() || name;
 }
 
-function areaLabel(p: Pad): string {
-  const l = String((p as any).label ?? "").trim();
-  return l.length ? l : "";
-}
-
-function tagBadge(tag?: string) {
-  if (!tag) return null;
-  return (
-    <span
-      style={{
-        marginLeft: 8,
-        padding: "2px 8px",
-        borderRadius: 999,
-        border: "1px solid rgba(255,255,255,0.25)",
-        fontSize: 11,
-        fontWeight: 900,
-        letterSpacing: 0.6,
-        opacity: 0.9,
-        whiteSpace: "nowrap",
-        background: "rgba(0,0,0,0.25)",
-      }}
-    >
-      {tag}
-    </span>
-  );
-}
-
-function teamInline(t?: Team | null) {
-  if (!t) return <span style={{ color: "var(--text-tertiary)" }}>—</span>;
-  const meta = [t.division, t.category].filter(Boolean).join(" • ");
-  const tag = (t as any).tag as string | undefined;
-
-  return (
-    <span>
-      <span style={{ fontWeight: 1000, color: "var(--text-primary)" }}>
-        {t.name}
-      </span>
-      {meta ? (
-        <span style={{ color: "var(--text-secondary)" }}> ({meta})</span>
-      ) : null}
-      {tag ? tagBadge(tag) : null}
-    </span>
-  );
+/** Category from pad label (strip parenthetical, uppercase) */
+function categoryForDisplay(p: Pad): string {
+  const l = String(p.label ?? "").trim();
+  if (!l) return "";
+  return l.replace(/\s*\([^)]*\)\s*$/, "").trim().toUpperCase();
 }
 
 function isArrivedForNow(p: Pad): boolean {
@@ -311,25 +271,6 @@ function beep() {
   } catch {}
 }
 
-/** ---------- Lane UI (for NOW chip) ---------- */
-function laneChip(_label: string, bg: string, fg: string): React.CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    height: 22,
-    padding: "0 10px",
-    borderRadius: 999,
-    fontSize: 11,
-    fontWeight: 1000,
-    letterSpacing: 1.1,
-    background: bg,
-    color: fg,
-    border: "1px solid rgba(255,255,255,0.10)",
-    textTransform: "uppercase",
-  };
-}
-
-/** NEW: NOW lane should match pad status color */
 function nowAccentForStatus(status: string) {
   switch (status) {
     case "BREAK":
@@ -346,23 +287,62 @@ function nowAccentForStatus(status: string) {
   }
 }
 
-function nowChipForStatus(status: string): React.CSSProperties {
-  if (status === "REPORTING") return laneChip("NOW", COLOR_YELLOW, "#111");
-  if (status === "BREAK" || status === "GLOBAL BREAK")
-    return laneChip("NOW", COLOR_ORANGE, "#111");
-  if (status === "ON PAD") return laneChip("NOW", COLOR_BLUE, "#111");
-  if (status === "LATE") return laneChip("NOW", COLOR_RED, "white");
-  return laneChip("NOW", "rgba(245, 197, 24, 0.95)", "#111"); // default gold
+/** Operational display state for pad card */
+type OpStatus = "REPORTING" | "ON_NOW" | "LATE" | "AREA_BREAK" | "IDLE";
+
+function getOpStatus(
+  p: Pad,
+  banner: Banner | null,
+  nowMs: number,
+  globalBreakActive: boolean,
+): OpStatus {
+  if (globalBreakActive) return "IDLE";
+  if (p.breakUntilAt && p.breakUntilAt > nowMs) return "AREA_BREAK";
+  if (banner?.kind === "REPORT") return banner.late ? "LATE" : "REPORTING";
+  if (banner?.kind === "ONPAD" || p.now) return "ON_NOW";
+  return "IDLE";
+}
+
+/** Timer seconds and label for display */
+function getTimerInfo(
+  p: Pad,
+  banner: Banner | null,
+  nowMs: number,
+  opStatus: OpStatus,
+): { seconds: number; label: string } | null {
+  if (opStatus === "AREA_BREAK" && p.breakUntilAt) {
+    return {
+      seconds: Math.max(0, (p.breakUntilAt - nowMs) / 1000),
+      label: "Next round begins in",
+    };
+  }
+  if (opStatus === "REPORTING" && p.reportByDeadlineAt) {
+    const sec = Math.max(0, (p.reportByDeadlineAt - nowMs) / 1000);
+    return { seconds: sec, label: "REPORT IN" };
+  }
+  if (opStatus === "ON_NOW" && p.nowArrivedAt) {
+    return {
+      seconds: (nowMs - p.nowArrivedAt) / 1000,
+      label: "TIME ON PAD",
+    };
+  }
+  if (opStatus === "LATE" && p.reportByDeadlineAt) {
+    return {
+      seconds: (nowMs - p.reportByDeadlineAt) / 1000,
+      label: "LATE BY",
+    };
+  }
+  return null;
 }
 
 export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
   const [state, setState] = useState<BoardState | null>(null);
-  const [search, setSearch] = useState("");
-  const [big, setBig] = useState(true);
   const [, tick] = useState(0);
+  const [nowCompetingPads, setNowCompetingPads] = useState<Set<number>>(new Set());
 
   const lastBeepByPad = useRef<Record<number, number>>({});
   const prevLateByPad = useRef<Record<number, boolean>>({});
+  const prevNowTeamByPad = useRef<Record<number, string | null>>({});
 
   useEffect(() => {
     fetch("/api/socket");
@@ -409,7 +389,6 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
     [globalSchedule, nowMs],
   );
 
-  // keep available for collision warnings / future UI
   const nextBreakLunch = useMemo(
     () => nextBreakLike(globalSchedule, nowMs),
     [globalSchedule, nowMs],
@@ -473,21 +452,6 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
     state?.globalMessageUntilAt,
   ]);
 
-  const filteredPads: Pad[] = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return pads;
-
-    const match = (t?: Team | null) =>
-      !!t &&
-      `${t.id} ${t.name} ${t.unit ?? ""} ${t.category ?? ""} ${t.division ?? ""}`
-        .toLowerCase()
-        .includes(q);
-
-    return pads.filter(
-      (p) => match(p.now) || match(p.onDeck) || p.standby.some((t) => match(t)),
-    );
-  }, [pads, search]);
-
   useEffect(() => {
     if (!kiosk) return;
     if (globalBreakActive) return;
@@ -508,6 +472,30 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
     }
   }, [pads, effectiveNow, kiosk, globalBreakActive, isLive]);
 
+  const initialPadSync = useRef(false);
+  useEffect(() => {
+    for (const p of pads) {
+      const nowId = p.now?.id ?? null;
+      const prevId = prevNowTeamByPad.current[p.id];
+      if (!initialPadSync.current) {
+        prevNowTeamByPad.current[p.id] = nowId ?? null;
+      } else if (nowId && nowId !== prevId) {
+        prevNowTeamByPad.current[p.id] = nowId;
+        setNowCompetingPads((s) => new Set(s).add(p.id));
+        setTimeout(() => {
+          setNowCompetingPads((s) => {
+            const next = new Set(s);
+            next.delete(p.id);
+            return next;
+          });
+        }, 2000);
+      } else {
+        prevNowTeamByPad.current[p.id] = nowId ?? null;
+      }
+    }
+    if (pads.length > 0) initialPadSync.current = true;
+  }, [pads]);
+
   return (
     <div
       className="responsive-page"
@@ -515,7 +503,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
         minHeight: "100vh",
         background: "var(--page-bg)",
         color: "var(--text-primary)",
-        padding: big ? 18 : 22,
+        padding: 18,
         fontFamily: "system-ui",
       }}
     >
@@ -523,16 +511,17 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
         @keyframes lateFlash { 0%{opacity:1} 50%{opacity:.55} 100%{opacity:1} }
       `}</style>
 
-      {/* Header (Admin-style) */}
+      {/* Event banner header - scoreboard style */}
       <div
         className="public-header"
         style={{
           display: "flex",
-          gap: 16,
+          gap: 24,
           alignItems: "center",
+          justifyContent: "space-between",
           flexWrap: "wrap",
-          padding: "16px 18px",
-          borderRadius: 18,
+          padding: "20px 24px",
+          borderRadius: 12,
           background: "rgba(255,255,255,0.06)",
           border: "1px solid rgba(255,255,255,0.12)",
           boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
@@ -543,20 +532,29 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
           alt="California Cadet Corps"
           className="public-header-logo"
           style={{
-            width: 132,
-            height: 132,
+            width: 80,
+            height: 80,
             objectFit: "contain",
-            borderRadius: 14,
+            borderRadius: 10,
             background: "rgba(0,0,0,0.25)",
             border: "1px solid rgba(255,255,255,0.14)",
-            padding: 10,
+            padding: 8,
           }}
         />
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 4,
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
           <div
             style={{
-              fontSize: 22,
+              fontSize: 18,
               fontWeight: 900,
               letterSpacing: 1.2,
               opacity: 0.92,
@@ -565,67 +563,29 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
           >
             CALIFORNIA CADET CORPS
           </div>
-
           <div
             className="public-header-title"
             style={{
               fontWeight: 1000,
-              fontSize: 40,
+              fontSize: 32,
               letterSpacing: -0.3,
               lineHeight: 1.05,
             }}
           >
-            {(state as any)?.eventHeaderLabel?.trim() || "Event Board"}
-          </div>
-
-          <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
-            {state?.updatedAt
-              ? `Last update: ${fmtTime(state.updatedAt)}`
-              : "Connecting…"}
+            {(state as any)?.eventHeaderLabel?.trim() || "DRILL COMPETITION BOARD"}
           </div>
         </div>
 
         <div
           style={{
-            marginLeft: "auto",
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            flexWrap: "wrap",
+            fontSize: 13,
+            color: "var(--text-tertiary)",
+            whiteSpace: "nowrap",
           }}
         >
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search team name / id..."
-            style={{
-              padding: "10px 12px",
-              width: 320,
-              maxWidth: "82vw",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.18)",
-              background: "rgba(0,0,0,0.25)",
-              color: "white",
-              outline: "none",
-            }}
-          />
-
-          {!kiosk && (
-            <button
-              onClick={() => setBig((v) => !v)}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.18)",
-                background: big ? "var(--cacc-gold)" : "rgba(0,0,0,0.25)",
-                color: big ? "#111" : "white",
-                fontWeight: 900,
-                cursor: "pointer",
-              }}
-            >
-              {big ? "Normal" : "Big-screen"}
-            </button>
-          )}
+          {state?.updatedAt
+            ? `Last Update: ${fmtTime(state.updatedAt)}`
+            : "Connecting…"}
         </div>
       </div>
 
@@ -719,7 +679,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
                     flexWrap: "wrap",
                   }}
                 >
-                  <div style={{ fontWeight: 950, fontSize: big ? 16 : 18 }}>
+                  <div style={{ fontWeight: 950, fontSize: 16 }}>
                     {b.kind.includes("BREAK") ? "🟠 " : "📢 "}
                     {b.title}
                   </div>
@@ -758,7 +718,7 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
 
       {/* Grid */}
       <div
-        className={`public-board-grid ${big ? "public-board-grid-big" : ""}`}
+        className="public-board-grid"
         style={{
           marginTop: 14,
           gap: 14,
@@ -776,134 +736,477 @@ export default function PublicBoard({ kiosk = false }: { kiosk?: boolean }) {
           >
             No areas yet.
           </div>
-        ) : filteredPads.length === 0 ? (
-          <div
-            style={{
-              gridColumn: "1 / -1",
-              padding: 24,
-              textAlign: "center",
-              opacity: 0.75,
-              fontSize: 15,
-            }}
-          >
-            No matches for "{search}".
-          </div>
         ) : (
-        filteredPads.map((p) => {
-          const banner = getPadBanner(p, effectiveNow, globalBreakActive, isLive);
-          const status = deriveStatus(p, banner, effectiveNow, globalBreakActive);
-          const { bg, fg } = statusColors(status);
+          pads.map((p) => {
+            const banner = getPadBanner(p, effectiveNow, globalBreakActive, isLive);
+            const opStatus = getOpStatus(p, banner, effectiveNow, globalBreakActive);
+            const timerInfo = getTimerInfo(p, banner, effectiveNow, opStatus);
+            const category = categoryForDisplay(p);
+            const showNowCompeting = nowCompetingPads.has(p.id);
+            const standbyCount = p.standby?.length ?? 0;
+            const reportTargetDuringBreak =
+              opStatus === "AREA_BREAK" &&
+              p.reportByTeamId &&
+              p.now &&
+              p.reportByTeamId === p.now.id
+                ? p.now
+                : null;
 
-          const nowAccent = nowAccentForStatus(status);
+            const borderColor =
+              opStatus === "REPORTING"
+                ? COLOR_YELLOW
+                : opStatus === "ON_NOW"
+                  ? COLOR_BLUE
+                  : opStatus === "LATE"
+                    ? COLOR_RED
+                    : opStatus === "AREA_BREAK"
+                      ? COLOR_ORANGE
+                      : "var(--border-crisp)";
 
-          const lateFlash =
-            banner?.kind === "REPORT" && banner.late
-              ? { animation: "lateFlash 1.0s ease-in-out infinite" as const }
-              : null;
+            const statusConfig =
+              opStatus === "REPORTING"
+                ? { label: "REPORTING", color: COLOR_YELLOW }
+                : opStatus === "ON_NOW"
+                  ? { label: "ON NOW", color: COLOR_BLUE }
+                  : opStatus === "LATE"
+                    ? { label: "LATE – REPORT NOW", color: COLOR_RED }
+                    : opStatus === "AREA_BREAK"
+                      ? { label: "AREA BREAK", color: COLOR_ORANGE }
+                      : null;
 
-          const nextEv = nextRelevantEventForPad(schedule, p.id, nowMs);
-          const nextEvText = nextEv
-            ? `${nextEv.title} in ${mmssFromSeconds((nextEv.startAt - nowMs) / 1000)}`
-            : "—";
+            const isLate = opStatus === "LATE";
+            const timerStr =
+              timerInfo != null
+                ? formatTimerForDisplay(Math.abs(timerInfo.seconds))
+                : null;
 
-          // keep computed for future use
-          void nextBreakLunch;
-
-          const bs = banner ? bannerStyle(banner) : null;
-          const bannerOverrides = bs
-            ? {
-                background: bs.background as string | undefined,
-                border: bs.border as string | undefined,
-              }
-            : undefined;
-
-          return (
-            <PadContainer
-              key={p.id}
-              variant="display"
-              statusBg={bg}
-              style={{ minHeight: big ? 320 : 360 }}
-            >
-              <PadHeader
-                variant="display"
-                padName={areaName(p)}
-                subtitle={areaLabel(p) || undefined}
-                nextScheduled={nextEvText}
-                statusPill={<span style={chipStyle(bg, fg)}>{status}</span>}
-                updatedAt={
-                  p.updatedAt ? `Updated: ${fmtTime(p.updatedAt)}` : undefined
-                }
-              />
-
-              <PadPrimarySection
-                variant="display"
-                statusAccent={nowAccent}
-                statusBadge={<span style={nowChipForStatus(status)}>NOW</span>}
-                timer={
-                  banner?.rightText ? (
+            return (
+              <div
+                key={p.id}
+                className={`public-scoreboard-card ${isLate ? "public-scoreboard-late-flash" : ""}`}
+                style={{
+                  borderRadius: 12,
+                  overflow: "hidden",
+                  background: "var(--surface-1)",
+                  border: `2px solid ${borderColor}`,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+                  minHeight: 360,
+                }}
+              >
+                <div style={{ height: 4, background: borderColor }} />
+                {/* Header band */}
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "0 24px",
+                    height: 60,
+                    background: "rgba(0,0,0,0.35)",
+                    borderBottom: "1px solid var(--divider)",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 20,
+                      fontWeight: 1000,
+                      letterSpacing: 1.2,
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    PAD {p.id}
+                  </span>
+                  {category ? (
                     <span
                       style={{
-                        fontFamily:
-                          "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        fontWeight: 900,
+                        fontSize: 15,
+                        fontWeight: 600,
+                        letterSpacing: "0.08em",
+                        color: COLOR_CATEGORY,
+                        textTransform: "uppercase",
                       }}
                     >
-                      {banner.rightText}
+                      {category}
                     </span>
-                  ) : undefined
-                }
-                competitorContent={teamInline(p.now)}
-                padMessage={
-                  banner?.kind === "PAD_MSG" ? banner.title : undefined
-                }
-                subContent={
-                  banner?.sub
-                    ? banner.kind === "BREAK_ACTIVE" && p.breakReason
-                      ? `${(p.breakReason ?? "Break").trim()} • ${banner.sub}`
-                      : banner.sub
-                    : undefined
-                }
-                bannerOverrides={bannerOverrides}
-                lateFlash={!!(banner?.kind === "REPORT" && banner.late)}
-              />
+                  ) : null}
+                </div>
 
-              <PadOnDeckSection
-                variant="display"
-                label="ON DECK"
-                labelRight="NEXT"
-              >
-                {teamInline(p.onDeck)}
-              </PadOnDeckSection>
+                <div style={{ padding: 24 }}>
+                  {opStatus === "AREA_BREAK" ? (
+                    /* AREA BREAK layout */
+                    <>
+                      <div
+                        style={{
+                          marginBottom: 16,
+                          borderBottom: "1px solid var(--divider)",
+                          paddingBottom: 16,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginBottom: 12,
+                          }}
+                        >
+                          <span
+                            style={{
+                              width: 10,
+                              height: 10,
+                              borderRadius: "50%",
+                              background: COLOR_ORANGE,
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span
+                            style={{
+                              fontSize: 14,
+                              fontWeight: 900,
+                              letterSpacing: 1,
+                              color: COLOR_ORANGE,
+                            }}
+                          >
+                            AREA BREAK
+                          </span>
+                        </div>
+                        {timerStr && timerInfo ? (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 700,
+                                letterSpacing: 1,
+                                color: "var(--text-secondary)",
+                                marginBottom: 6,
+                              }}
+                            >
+                              {timerInfo.label}
+                            </div>
+                            <div
+                              style={{
+                                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                                fontSize: 36,
+                                fontWeight: 900,
+                                color: "var(--text-primary)",
+                                fontVariantNumeric: "tabular-nums",
+                              }}
+                            >
+                              {timerStr}
+                            </div>
+                          </>
+                        ) : null}
+                        {reportTargetDuringBreak && timerStr ? (
+                          <div
+                            style={{
+                              marginTop: 16,
+                              paddingTop: 16,
+                              borderTop: "1px solid var(--divider)",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 18,
+                                fontWeight: 600,
+                                color: "var(--text-primary)",
+                                marginBottom: 6,
+                              }}
+                            >
+                              {schoolNameForDisplay(reportTargetDuringBreak)}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 13,
+                                fontWeight: 700,
+                                letterSpacing: 1,
+                                color: "var(--text-secondary)",
+                              }}
+                            >
+                              REPORT IN {timerStr}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                      {/* On deck - always shown, no REPORT IN for on deck during break */}
+                      <div
+                        style={{
+                          marginBottom: 16,
+                          borderBottom: "1px solid var(--divider)",
+                          paddingBottom: 16,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 900,
+                            letterSpacing: 1,
+                            color: "var(--text-tertiary)",
+                            marginBottom: 8,
+                          }}
+                        >
+                          ON DECK
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 20,
+                            fontWeight: 600,
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          {schoolNameForDisplay(p.onDeck)}
+                        </div>
+                      </div>
+                      {/* Standby */}
+                      <div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 900,
+                            letterSpacing: 1,
+                            color: "var(--text-tertiary)",
+                            marginBottom: 8,
+                          }}
+                        >
+                          STANDBY
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 18,
+                            fontWeight: 600,
+                            color: "var(--text-primary)",
+                            opacity: 0.85,
+                          }}
+                        >
+                          {standbyCount > 0
+                            ? schoolNameForDisplay(p.standby![0])
+                            : "—"}
+                        </div>
+                        {standbyCount > 1 ? (
+                          <div
+                            style={{
+                              marginTop: 6,
+                              fontSize: 13,
+                              color: "var(--text-tertiary)",
+                            }}
+                          >
+                            {standbyCount - 1} teams waiting
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : (
+                    /* Normal operation: REPORTING, ON_NOW, LATE, IDLE */
+                    <>
+                      <div
+                        style={{
+                          marginBottom: 16,
+                          borderBottom: "1px solid var(--divider)",
+                          paddingBottom: 16,
+                        }}
+                      >
+                        {showNowCompeting && opStatus === "ON_NOW" ? (
+                          <div
+                            className="public-scoreboard-now-competing"
+                            style={{
+                              marginBottom: 12,
+                              padding: "8px 12px",
+                              background: "rgba(21,101,192,0.25)",
+                              borderRadius: 8,
+                              border: "1px solid rgba(21,101,192,0.5)",
+                              textAlign: "center",
+                              fontSize: 14,
+                              fontWeight: 900,
+                              letterSpacing: 1,
+                              color: COLOR_BLUE,
+                            }}
+                          >
+                            NOW COMPETING
+                          </div>
+                        ) : null}
+                        {statusConfig ? (
+                          <div
+                            className={
+                              isLate ? "public-scoreboard-late-status" : ""
+                            }
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 8,
+                              marginBottom: 10,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 10,
+                                height: 10,
+                                borderRadius: "50%",
+                                background: statusConfig.color,
+                                flexShrink: 0,
+                              }}
+                            />
+                            <span
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                letterSpacing: 1,
+                                color: statusConfig.color,
+                              }}
+                            >
+                              {statusConfig.label}
+                            </span>
+                          </div>
+                        ) : null}
+                        <div
+                          key={p.now?.id ?? "empty"}
+                          className="public-scoreboard-team-in"
+                          style={{
+                            fontSize: 30,
+                            fontWeight: 800,
+                            letterSpacing: 0.5,
+                            color: "var(--text-primary)",
+                            lineHeight: 1.2,
+                            marginBottom: 8,
+                          }}
+                        >
+                          {schoolNameForDisplay(p.now).toUpperCase()}
+                        </div>
+                        {timerStr && timerInfo ? (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                letterSpacing: 1,
+                                color: "var(--text-tertiary)",
+                                marginBottom: 4,
+                              }}
+                            >
+                              {timerInfo.label}
+                            </div>
+                            <div
+                              style={{
+                                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                                fontSize: 36,
+                                fontWeight: 900,
+                                color: "var(--text-primary)",
+                                fontVariantNumeric: "tabular-nums",
+                              }}
+                            >
+                              {timerStr}
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
 
-              <PadStandbySection
-                variant="display"
-                count={p.standby?.length ?? 0}
-              >
-                {(p.standby?.length ?? 0) > 0 ? (
-                  <>
-                    {teamInline(p.standby![0])}
-                    {(p.standby?.length ?? 0) > 1 ? (
-                      <span style={{ color: "var(--text-tertiary)" }}>
-                        {" "}
-                        +{p.standby!.length - 1} more
-                      </span>
-                    ) : null}
-                  </>
-                ) : (
-                  <span style={{ color: "var(--text-tertiary)" }}>—</span>
-                )}
-              </PadStandbySection>
-            </PadContainer>
-          );
-        })
+                      {/* On deck */}
+                      <div
+                        style={{
+                          marginBottom: 16,
+                          borderBottom: "1px solid var(--divider)",
+                          paddingBottom: 16,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginBottom: 8,
+                          }}
+                        >
+                          <span
+                            style={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              background: COLOR_STANDBY,
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 900,
+                              letterSpacing: 1,
+                              color: "var(--text-tertiary)",
+                            }}
+                          >
+                            ON DECK
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 20,
+                            fontWeight: 600,
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          {schoolNameForDisplay(p.onDeck)}
+                        </div>
+                      </div>
+
+                      {/* Standby */}
+                      <div>
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginBottom: 8,
+                          }}
+                        >
+                          <span
+                            style={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              background: COLOR_STANDBY,
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 900,
+                              letterSpacing: 1,
+                              color: "var(--text-tertiary)",
+                            }}
+                          >
+                            STANDBY
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 18,
+                            fontWeight: 600,
+                            color: "var(--text-primary)",
+                            opacity: 0.85,
+                          }}
+                        >
+                          {standbyCount > 0
+                            ? schoolNameForDisplay(p.standby![0])
+                            : "—"}
+                        </div>
+                        {standbyCount > 1 ? (
+                          <div
+                            style={{
+                              marginTop: 6,
+                              fontSize: 13,
+                              color: "var(--text-tertiary)",
+                            }}
+                          >
+                            {standbyCount - 1} teams waiting
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
-
-      {filteredPads.length === 0 && pads.length > 0 ? (
-        <div style={{ marginTop: 16, color: "var(--text-tertiary)" }}>
-          No matches for “{search}”.
-        </div>
-      ) : null}
     </div>
   );
 }
