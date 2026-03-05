@@ -693,10 +693,20 @@ export default function handler(req: NextApiRequest, res: NextResWithSocket) {
           try {
             ack?.({ ok, assignedPadId, error });
           } catch {}
+          if (!ok && error) {
+            socket.emit("judge:bind:error", { code: "BIND_FAILED", message: error });
+          }
         };
 
-        if ((socket as any).data?.role !== "judge") {
-          sendAck(false, undefined, "Not a judge");
+        const role = (socket as any).data?.role;
+        if (!["judge", "admin"].includes(role)) {
+          socket.emit("judge:bind:error", {
+            code: "NOT_JUDGE",
+            message: "Not authorized to bind as judge",
+          });
+          try {
+            ack?.({ ok: false, error: "Not authorized" });
+          } catch {}
           return;
         }
         const padIdRaw = payload?.padId != null ? Math.floor(Number(payload.padId)) : null;

@@ -185,6 +185,7 @@ export default function JudgeConsole() {
   const [showConfirmChangeArea, setShowConfirmChangeArea] = useState(false);
   const [lastAction, setLastAction] = useState("—");
   const [judgeBound, setJudgeBound] = useState(false);
+  const [bindError, setBindError] = useState<string | null>(null);
 
   const activePadId = lockedPadId;
 
@@ -250,6 +251,7 @@ export default function JudgeConsole() {
       setConnected(false);
       setSocketId("");
       setJudgeBound(false);
+      setBindError(null);
     };
 
     const onState = (next: BoardState) => {
@@ -360,29 +362,61 @@ export default function JudgeConsole() {
   }, [socket]);
 
   // ===== Judge area bind handshake (must succeed before actions work) =====
+  const BIND_ERROR_MSG = "Unable to connect to judge console. Please refresh or log in again.";
+
   useEffect(() => {
     if (!socket || lockedPadId == null) {
       setJudgeBound(false);
+      setBindError(null);
       return;
     }
 
     setJudgeBound(false);
+    setBindError(null);
+    let bindFailed = false;
+    let bindTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const handleBindFailure = (reason?: string) => {
+      if (bindFailed) return;
+      bindFailed = true;
+      if (bindTimeout) {
+        clearTimeout(bindTimeout);
+        bindTimeout = null;
+      }
+      setJudgeBound(false);
+      setBindError(BIND_ERROR_MSG);
+      setLastAction(reason ? `❌ ${reason}` : "❌ Bind failed");
+    };
 
     const doBind = () => {
+      bindFailed = false;
+      setBindError(null);
+      bindTimeout = setTimeout(() => handleBindFailure("Bind timeout"), 5000);
+
       (socket as any).emit?.(
         "judge:area:set",
         { padId: lockedPadId },
-        (res: { ok?: boolean; assignedPadId?: number; error?: string }) => {
-          if (res?.ok === true) {
+        (ack?: { ok?: boolean; assignedPadId?: number; error?: string }) => {
+          if (bindFailed) return;
+          bindFailed = true;
+          if (bindTimeout) {
+            clearTimeout(bindTimeout);
+            bindTimeout = null;
+          }
+          if (ack?.ok === true) {
             setJudgeBound(true);
+            setBindError(null);
             setLastAction("—");
             (socket as any).emit?.("comm:joinPad", { padId: lockedPadId });
           } else {
-            setJudgeBound(false);
-            setLastAction(`❌ Bind failed: ${res?.error ?? "unknown"}`);
+            handleBindFailure(ack?.error ?? "Bind failed");
           }
         },
       );
+    };
+
+    const onBindError = (payload: { message?: string; error?: string }) => {
+      handleBindFailure(payload?.message ?? payload?.error ?? "Unable to bind as judge. Please log in again.");
     };
 
     doBind();
@@ -392,8 +426,11 @@ export default function JudgeConsole() {
     };
 
     socket.on?.("connect", onConnect);
+    socket.on?.("judge:bind:error", onBindError);
     return () => {
+      if (bindTimeout) clearTimeout(bindTimeout);
       socket.off?.("connect", onConnect);
+      socket.off?.("judge:bind:error", onBindError);
     };
   }, [socket, lockedPadId]);
 
@@ -783,11 +820,11 @@ export default function JudgeConsole() {
             {lockedPadId != null && pad ? (
               <span
                 style={chipStyle(
-                  judgeBound ? "rgba(76, 175, 80, 0.35)" : "rgba(255, 152, 0, 0.35)",
+                  judgeBound ? "rgba(76, 175, 80, 0.35)" : bindError ? "rgba(244, 67, 54, 0.35)" : "rgba(255, 152, 0, 0.35)",
                   "white",
                 )}
               >
-                {judgeBound ? `Assigned: Pad ${lockedPadId}` : "Binding…"}
+                {judgeBound ? `Assigned: Pad ${lockedPadId}` : bindError ?? "Binding…"}
               </span>
             ) : null}
 
